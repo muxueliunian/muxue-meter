@@ -6,6 +6,13 @@
 
 
 const KEEP_DAYS = 40
+
+// Update check. VERSION must match .claude-plugin/plugin.json; UPDATE_URL is that file on the
+// default branch of the published repo. At most one check per UPDATE_EVERY across all sessions
+// (the last result is shared through $.store). Leave UPDATE_URL empty to turn the check off.
+const VERSION = '0.3.0'
+const UPDATE_URL = 'https://raw.githubusercontent.com/muxueliunian/claude-usage-mod/main/.claude-plugin/plugin.json'
+const UPDATE_EVERY = 6 * 3600000
 const MIN_TPS_MS = 200
 const MIN_TPS_TOKENS = 20
 
@@ -196,6 +203,40 @@ async function refreshOthers($, full = false) {
   $.ui.invalidate('ui.render')
 }
 
+// ---- update check -----------------------------------------------------------------------
+
+let latest = null // newer version than VERSION, or null
+
+// "1.2.10" > "1.2.9"; a pre-release suffix is ignored.
+const newer = (a, b) => {
+  const pa = String(a).split('-')[0].split('.').map(Number)
+  const pb = String(b).split('-')[0].split('.').map(Number)
+  for (let k = 0; k < 3; k++) {
+    if ((pa[k] || 0) !== (pb[k] || 0)) return (pa[k] || 0) > (pb[k] || 0)
+  }
+  return false
+}
+
+async function checkUpdate($) {
+  if (!UPDATE_URL) return
+  const now = await $.clock.now()
+  let saved = await $.store.get('upd')
+  if (!saved || now - (saved.at || 0) > UPDATE_EVERY) {
+    // Record the attempt first, so a failing or offline check is not retried by every session.
+    saved = { at: now, version: saved?.version || null }
+    try {
+      const res = await $.http.fetch(UPDATE_URL)
+      if (res.ok) saved.version = JSON.parse(res.text)?.version || null
+    } catch {}
+    await $.store.set('upd', saved)
+  }
+  const next = saved.version && newer(saved.version, VERSION) ? saved.version : null
+  if (next !== latest) {
+    latest = next
+    $.ui.invalidate('ui.render')
+  }
+}
+
 // ---- recording --------------------------------------------------------------------------
 
 async function record($, model, usage, gen) {
@@ -329,6 +370,7 @@ const STR = {
     models: 'Share by model (by value)', nopr: 'no price', daily: 'Daily value',
     tpsAvg: 'Average TPS by model',
     exact: 'Exact', kmb: 'K/M/B', refresh: 'Refresh', cmd: 'Expand or collapse the usage window',
+    upd: "New version {v}", updHow: "Update: run git pull in the plugin folder, then /reload-plugins",
   },
   'zh-CN': {
     session: '当前会话', today: '今日', hit: '缓存命中', more: '详情', less: '收起',
@@ -340,6 +382,7 @@ const STR = {
     models: '各模型占比（按价值）', nopr: '无价格', daily: '每日价值',
     tpsAvg: '各模型平均 TPS',
     exact: '精确值', kmb: 'K/M/B', refresh: '刷新', cmd: '展开或收起用量小窗口',
+    upd: "新版本 {v}", updHow: "更新方法：在插件目录运行 git pull，然后 /reload-plugins",
   },
   'zh-TW': {
     session: '目前工作階段', today: '今日', hit: '快取命中', more: '詳情', less: '收合',
@@ -351,6 +394,7 @@ const STR = {
     models: '各模型占比（依價值）', nopr: '無價格', daily: '每日價值',
     tpsAvg: '各模型平均 TPS',
     exact: '精確值', kmb: 'K/M/B', refresh: '重新整理', cmd: '展開或收合用量小視窗',
+    upd: "新版本 {v}", updHow: "更新方式：在外掛目錄執行 git pull，然後 /reload-plugins",
   },
   ja: {
     session: 'セッション', today: '今日', hit: 'キャッシュ命中', more: '詳細', less: '閉じる',
@@ -362,6 +406,7 @@ const STR = {
     models: 'モデル別の割合（金額ベース）', nopr: '価格なし', daily: '日別の金額',
     tpsAvg: 'モデル別の平均 TPS',
     exact: '正確な値', kmb: 'K/M/B', refresh: '更新', cmd: '使用量ウィンドウを開閉',
+    upd: "新バージョン {v}", updHow: "更新方法：プラグインのフォルダで git pull を実行し、/reload-plugins",
   },
   ko: {
     session: '현재 세션', today: '오늘', hit: '캐시 적중', more: '자세히', less: '닫기',
@@ -373,6 +418,7 @@ const STR = {
     models: '모델별 비중 (가치 기준)', nopr: '가격 없음', daily: '일별 가치',
     tpsAvg: '모델별 평균 TPS',
     exact: '정확한 값', kmb: 'K/M/B', refresh: '새로고침', cmd: '사용량 창 열기/닫기',
+    upd: "새 버전 {v}", updHow: "업데이트: 플러그인 폴더에서 git pull 실행 후 /reload-plugins",
   },
   es: {
     session: 'Sesión', today: 'Hoy', hit: 'Acierto de caché', more: 'Detalles', less: 'Cerrar',
@@ -384,6 +430,7 @@ const STR = {
     models: 'Reparto por modelo (por valor)', nopr: 'sin precio', daily: 'Valor diario',
     tpsAvg: 'TPS medio por modelo',
     exact: 'Exacto', kmb: 'K/M/B', refresh: 'Actualizar', cmd: 'Mostrar u ocultar la ventana de uso',
+    upd: "Nueva versión {v}", updHow: "Para actualizar: ejecuta git pull en la carpeta del plugin y luego /reload-plugins",
   },
   de: {
     session: 'Sitzung', today: 'Heute', hit: 'Cache-Treffer', more: 'Details', less: 'Schließen',
@@ -395,6 +442,7 @@ const STR = {
     models: 'Anteil je Modell (nach Wert)', nopr: 'kein Preis', daily: 'Tageswert',
     tpsAvg: 'Durchschnittliche TPS je Modell',
     exact: 'Exakt', kmb: 'K/M/B', refresh: 'Aktualisieren', cmd: 'Nutzungsfenster ein- oder ausklappen',
+    upd: "Neue Version {v}", updHow: "Aktualisieren: im Plugin-Ordner git pull ausführen, dann /reload-plugins",
   },
   fr: {
     session: 'Session', today: "Aujourd'hui", hit: 'Succès du cache', more: 'Détails', less: 'Fermer',
@@ -406,6 +454,7 @@ const STR = {
     models: 'Répartition par modèle (en valeur)', nopr: 'sans prix', daily: 'Valeur par jour',
     tpsAvg: 'TPS moyen par modèle',
     exact: 'Exact', kmb: 'K/M/B', refresh: 'Actualiser', cmd: "Afficher ou masquer la fenêtre d'utilisation",
+    upd: "Nouvelle version {v}", updHow: "Mise à jour : lancez git pull dans le dossier du plugin, puis /reload-plugins",
   },
   pt: {
     session: 'Sessão', today: 'Hoje', hit: 'Acerto de cache', more: 'Detalhes', less: 'Fechar',
@@ -417,6 +466,7 @@ const STR = {
     models: 'Participação por modelo (por valor)', nopr: 'sem preço', daily: 'Valor diário',
     tpsAvg: 'TPS médio por modelo',
     exact: 'Exato', kmb: 'K/M/B', refresh: 'Atualizar', cmd: 'Expandir ou recolher a janela de uso',
+    upd: "Nova versão {v}", updHow: "Para atualizar: execute git pull na pasta do plugin e depois /reload-plugins",
   },
   ru: {
     session: 'Сессия', today: 'Сегодня', hit: 'Попадания в кэш', more: 'Подробнее', less: 'Закрыть',
@@ -428,6 +478,7 @@ const STR = {
     models: 'Доля по моделям (по стоимости)', nopr: 'нет цены', daily: 'Стоимость по дням',
     tpsAvg: 'Средний TPS по моделям',
     exact: 'Точно', kmb: 'K/M/B', refresh: 'Обновить', cmd: 'Показать или скрыть окно использования',
+    upd: "Новая версия {v}", updHow: "Обновление: выполните git pull в папке плагина, затем /reload-plugins",
   },
 }
 
@@ -474,6 +525,8 @@ export function register(on) {
       await currentAccount($)
       await learnHints($)
       await refreshOthers($, true)
+      checkUpdate($).catch(() => {})
+      $.clock.every(3600000, () => checkUpdate($).catch(() => {}))
       $.clock.every(15000, () => refreshOthers($).catch(() => {}))
     } catch {}
     try {
@@ -564,7 +617,8 @@ export function register(on) {
       ['⚡ ' + tpsText, tr('session') + ' ' + usdOf(s), tr('today') + ' ' + usdOf(day), tr('hit') + ' ' + hitText],
       ['⚡' + (tps ? tps.value.toFixed(0) : '—'), usdOf(s) + '/' + usdOf(day), hitText],
     ].map((p) => p.join(' · '))
-    const room = cols - strWidth(toggleLabel) - 4
+    const badge = latest ? strWidth('⬆ ' + tr('upd', { v: 'v' + latest })) + 2 : 0
+    const room = cols - strWidth(toggleLabel) - 4 - badge
     const status = variants.find((v) => strWidth(v) <= room) || variants[variants.length - 1]
 
     const left = Box({
@@ -573,6 +627,7 @@ export function register(on) {
       columnGap: 2,
       children: [
         Text({ dimColor: true, wrap: 'truncate-end', children: [status] }),
+        ...(latest ? [Text({ color: 'yellow', children: ['⬆ ' + tr('upd', { v: 'v' + latest })] })] : []),
         Button({ key: 'toggle-usage', label: toggleLabel, plain: true, onPress: () => toggleExpanded($) }),
       ],
     })
@@ -606,6 +661,7 @@ export function register(on) {
       : left
 
     const children = [line]
+    if (expanded && latest) children.push(Text({ color: 'yellow', children: [tr('updHow')] }))
     if (expanded) children.push(detailView($, els, now, cols, editingName))
     const rest = await next(e)
     if (rest) children.push(rest)

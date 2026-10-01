@@ -24,6 +24,16 @@ claude --plugin-dir .
 
 校验：`claude plugin validate .`
 
+## 更新
+
+插件每 6 小时最多联网检查一次 GitHub 上的 `plugin.json`（所有会话共享结果），有新版本时状态条显示 `⬆ 新版本 vX.Y.Z`。只提示不自动更新，更新方法：
+
+```bash
+git pull
+```
+
+在插件目录执行后运行 `/reload-plugins`。不想联网检查时，把 `hooks/register.js` 顶部的 `UPDATE_URL` 设为空字符串。
+
 ## 口径
 
 - 实际输入 = 缓存读 + 缓存写 + 未缓存输入，即模型实际读入的量

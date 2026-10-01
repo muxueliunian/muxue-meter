@@ -1,6 +1,6 @@
 {
   "name": "usage-panel",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "TPS, token usage and API-equivalent cost panel for Claude Code (CLI and Desktop)",
   "author": { "name": "muxue" },
   "types": "./types/index.d.ts"

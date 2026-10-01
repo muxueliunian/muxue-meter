@@ -24,6 +24,11 @@
 - 账户来源优先级：环境变量 `CLAUDE_CODE_ACCOUNT_UUID`（桌面版按会话注入）> `~/.claude.json`（CLI 的 /login）
 - 桌面版切换账户只影响之后新建的会话
 
+## 发版
+- 版本号有两处，必须同时改：`.claude-plugin/plugin.json` 的 `version` 和 `hooks/register.js` 的 `VERSION`
+- 更新检查读取 GitHub 默认分支上的 `plugin.json`（`UPDATE_URL`），所以推送到 main 即等于发布；未完成的改动不要推到 main
+- 发现新版本时只提示，不自动更新（桌面版无法执行命令）
+
 ## 验证
 - 改完先运行 `claude plugin validate .`
 - 调试：`claude --plugin-dir . --debug`，被引擎拒绝的原因写在 debug 日志里
