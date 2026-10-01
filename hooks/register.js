@@ -1,4 +1,4 @@
-// usage-panel: TPS, token usage and API-equivalent cost for Claude Code.
+// muxue-meter: TPS, token usage and API-equivalent cost for Claude Code.
 //
 // Data flow: turn.step (streaming) -> record tokens + generation time ->
 // per-session doc in $.store ("s:<sessionId>") -> aggregated for the band and the pane.
@@ -7,11 +7,10 @@
 
 const KEEP_DAYS = 40
 
-// Update check. VERSION must match .claude-plugin/plugin.json; UPDATE_URL is that file on the
-// default branch of the published repo. At most one check per UPDATE_EVERY across all sessions
-// (the last result is shared through $.store). Leave UPDATE_URL empty to turn the check off.
-const VERSION = '0.3.0'
-const UPDATE_URL = 'https://raw.githubusercontent.com/muxueliunian/claude-usage-mod/main/.claude-plugin/plugin.json'
+// Update check. The installed version is read from this plugin's own plugin.json; UPDATE_URL is
+// the same file on the default branch of the published repo. At most one check per UPDATE_EVERY
+// across all sessions (the last result is shared through $.store). Empty UPDATE_URL: no check.
+const UPDATE_URL = 'https://raw.githubusercontent.com/muxueliunian/muxue-meter/main/.claude-plugin/plugin.json'
 const UPDATE_EVERY = 6 * 3600000
 const MIN_TPS_MS = 200
 const MIN_TPS_TOKENS = 20
@@ -30,7 +29,17 @@ const PRICES = [
   [/haiku-3-5/, 0.8, 4, 1, 0.08],
 ]
 
-const priceOf = (model) => PRICES.find((p) => p[0].test(model))
+// Fast mode is recorded as "<model>@fast". It costs FAST_X times the standard price on the models
+// FAST matches; elsewhere its price is unknown and the row shows as unpriced.
+const FAST = /opus-5/
+const FAST_X = 2
+const priceOf = (model) => {
+  const [base, speed] = model.split('@')
+  const p = PRICES.find((q) => q[0].test(base))
+  if (!p || !speed) return p
+  if (speed !== 'fast' || !FAST.test(base)) return undefined
+  return [p[0], ...p.slice(1).map((v) => v * FAST_X)]
+}
 const rowUsd = (model, r) => {
   const p = priceOf(model)
   if (!p) return 0
@@ -58,7 +67,7 @@ const emptyTotals = () => ({ ...emptyRow(), usd: 0 })
 let sid = null // current session id
 let doc = { days: {} } // this session: days[day][acct][model] = row
 let others = {} // other sessions, as last read from the store
-let cfg = { names: {}, hints: {}, range: '7', acct: 'all', exact: false, lang: 'auto' }
+let cfg = { names: {}, hints: {}, range: '7', acct: 'all', exact: false, lang: 'auto' } // see normCfg
 let curAcct = 'unknown'
 let acctReadAt = 0
 let lastFlush = 0
@@ -67,9 +76,9 @@ let lastFullRefresh = 0
 
 // UI state lives in $.state so a hot reload keeps it (module variables start over).
 // Declared in types/index.d.ts. A read while drawing subscribes the drawing to the value.
-const S_EXPANDED = { plugin: 'usage-panel', key: 'expanded' }
-const S_EDITING = { plugin: 'usage-panel', key: 'editingName' }
-const S_TPS = { plugin: 'usage-panel', key: 'tps' }
+const S_EXPANDED = { plugin: 'muxue-meter', key: 'expanded' }
+const S_EDITING = { plugin: 'muxue-meter', key: 'editingName' }
+const S_TPS = { plugin: 'muxue-meter', key: 'tps' }
 
 // ---- helpers that touch the mods API ----------------------------------------------------
 
@@ -123,17 +132,12 @@ async function learnHints($) {
   const found = [await readAccount($)]
   const cli = await readCliAccount($)
   if (cli) found.push({ id: await hashId(cli.uuid), hint: maskEmail(cli.email) })
-  let changed = false
-  const hints = { ...(cfg.hints || {}) }
-  for (const { id, hint } of found) {
-    if (id !== 'unknown' && hint && hints[id] !== hint) {
-      hints[id] = hint
-      changed = true
-    }
-  }
-  if (changed) {
-    cfg = { ...cfg, hints }
-    await saveCfg($)
+  const fresh = found.filter(({ id, hint }) => id !== 'unknown' && hint && cfg.hints[id] !== hint)
+  if (fresh.length) {
+    await updateCfg($, (c) => {
+      for (const { id, hint } of fresh) c.hints[id] = hint
+      return c
+    })
   }
 }
 async function currentAccount($) {
@@ -169,7 +173,14 @@ function scheduleFlush($) {
   })
 }
 
-async function saveCfg($) {
+// cfg is shared by every session. A change re-reads the stored copy and applies only itself,
+// so two sessions never undo each other's edits (a rename in one, a range change in another).
+const CFG_DEFAULTS = { names: {}, hints: {}, range: '7', acct: 'all', exact: false, lang: 'auto' }
+const normCfg = (c) => ({ ...CFG_DEFAULTS, ...(c || {}), names: { ...(c?.names || {}) }, hints: { ...(c?.hints || {}) } })
+async function updateCfg($, fn) {
+  const stored = await $.store.get('cfg')
+  cfg = normCfg(fn(normCfg(stored && typeof stored === 'object' ? stored : cfg)))
+  $.ui.invalidate('ui.render')
   await $.store.set('cfg', cfg)
 }
 
@@ -200,12 +211,35 @@ async function refreshOthers($, full = false) {
     next[k] = v
   }
   others = next
+  dataVersion++
   $.ui.invalidate('ui.render')
+}
+
+// ---- migration --------------------------------------------------------------------------
+// Until 0.4.0 the plugin was called usage-panel, and the host keeps one store per plugin name:
+// copy the old store's keys in once, never overwriting a key this store already has.
+
+async function migrateStore($) {
+  if (await $.store.get('migrated')) return
+  try {
+    const home = (await $.env.get('USERPROFILE')) || (await $.env.get('HOME'))
+    const dir = home + '/.claude/plugins/store'
+    const have = new Set(await $.store.keys())
+    for (const f of await $.fs.list(dir)) {
+      if (f.kind !== 'file' || !/^usage-panel_.*\.json$/.test(f.name)) continue
+      const old = JSON.parse(await $.fs.read(dir + '/' + f.name))
+      for (const [k, v] of Object.entries(old || {})) {
+        if (!have.has(k)) await $.store.set(k, v)
+      }
+    }
+  } catch {}
+  await $.store.set('migrated', true)
 }
 
 // ---- update check -----------------------------------------------------------------------
 
-let latest = null // newer version than VERSION, or null
+let version = null // installed version, from plugin.json
+let latest = null // published version newer than the installed one, or null
 
 // "1.2.10" > "1.2.9"; a pre-release suffix is ignored.
 const newer = (a, b) => {
@@ -219,6 +253,10 @@ const newer = (a, b) => {
 
 async function checkUpdate($) {
   if (!UPDATE_URL) return
+  if (!version) {
+    version = JSON.parse(await $.fs.read($.plugin.root + '/.claude-plugin/plugin.json'))?.version || null
+    if (!version) return
+  }
   const now = await $.clock.now()
   let saved = await $.store.get('upd')
   if (!saved || now - (saved.at || 0) > UPDATE_EVERY) {
@@ -230,7 +268,7 @@ async function checkUpdate($) {
     } catch {}
     await $.store.set('upd', saved)
   }
-  const next = saved.version && newer(saved.version, VERSION) ? saved.version : null
+  const next = saved.version && newer(saved.version, version) ? saved.version : null
   if (next !== latest) {
     latest = next
     $.ui.invalidate('ui.render')
@@ -257,6 +295,7 @@ async function record($, model, usage, gen) {
     row.gtok += usage.output_tokens
     await $.state.set(S_TPS, { value: usage.output_tokens / (gen.ms / 1000), model })
   }
+  dataVersion++
   scheduleFlush($)
   $.ui.invalidate('ui.render')
 }
@@ -270,7 +309,18 @@ function lastDays(n, now) {
 }
 
 // range: number of days. acctSel: 'all' or an account hash.
+// Recomputed only when the data, the day or the arguments change: a render calls it a few times.
+let dataVersion = 0
+const aggMemo = new Map()
 function aggregate(range, acctSel, now) {
+  const key = range + '|' + acctSel + '|' + dayKey(new Date(now)) + '|' + curAcct + '|' + dataVersion
+  if (!aggMemo.has(key)) {
+    if (aggMemo.size > 20) aggMemo.clear()
+    aggMemo.set(key, aggregateNow(range, acctSel, now))
+  }
+  return aggMemo.get(key)
+}
+function aggregateNow(range, acctSel, now) {
   const days = lastDays(range, now)
   const tot = emptyTotals()
   const byModel = {}
@@ -516,10 +566,9 @@ const toggleExpanded = async ($) => {
 export function register(on) {
   on('session.start', async ($, e, next) => {
     try {
+      await migrateStore($)
       const saved = await $.store.get('cfg')
-      if (saved && typeof saved === 'object') {
-        cfg = { ...cfg, ...saved, names: { ...(saved.names || {}) }, hints: { ...(saved.hints || {}) } }
-      }
+      cfg = normCfg(saved && typeof saved === 'object' ? saved : null)
       autoLang = await detectLang($)
       await ensureSession($)
       await currentAccount($)
@@ -530,12 +579,12 @@ export function register(on) {
       $.clock.every(15000, () => refreshOthers($).catch(() => {}))
     } catch {}
     try {
-      await $.command.register({ name: 'usage-mod', description: tr('cmd'), immediate: true })
+      await $.command.register({ name: 'meter', description: tr('cmd'), immediate: true })
     } catch {}
     return next(e)
   })
 
-  on('command.run', { command: 'usage-mod' }, async ($) => {
+  on('command.run', { command: 'meter' }, async ($) => {
     await toggleExpanded($)
     return {}
   })
@@ -543,6 +592,8 @@ export function register(on) {
   // /clear, /resume and /branch change the session id: start from that session's own doc.
   on('classic.SessionStart', { source: ['clear', 'resume', 'fork'] }, async ($, e, next) => {
     try {
+      // Write what the previous session recorded since the last flush before switching away.
+      await flush($)
       sid = null
       await ensureSession($)
     } catch {}
@@ -570,7 +621,8 @@ export function register(on) {
       const usage = stopUsage || result.usage
       if (usage) {
         const gen = first && stopAt ? { ms: stopAt - first } : null
-        await record($, usage.model || e.model, usage, gen)
+        const model = (usage.model || e.model) + (usage.speed === 'fast' ? '@fast' : '')
+        await record($, model, usage, gen)
       }
     } catch {}
     return result
@@ -651,9 +703,7 @@ export function register(on) {
               options: langOptions,
               value: cfg.lang,
               onSelect: (v) => {
-                cfg = { ...cfg, lang: v }
-                $.ui.invalidate('ui.render')
-                return saveCfg($)
+                return updateCfg($, (c) => ({ ...c, lang: v }))
               },
             }),
           ],
@@ -672,7 +722,6 @@ export function register(on) {
 // The expanded card: range, account, totals, per-model share, per-day value.
 // cols is the band's width; the card's inside is 4 cells narrower (border and padding).
 function detailView($, { Box, Text, Button, Input, Select }, now, cols, editingName) {
-  const redraw = () => $.ui.invalidate('ui.render')
   const inner = Math.max(30, cols - 4)
   const wide = inner >= 66
   const range = Number(cfg.range)
@@ -700,11 +749,7 @@ function detailView($, { Box, Text, Button, Input, Select }, now, cols, editingN
       children: n > 0 ? [Box({ width: n, height: 1, backgroundColor: 'cyan', children: [Text({ children: [' '] })] })] : [],
     })
   }
-  const setCfg = (patch) => {
-    cfg = { ...cfg, ...patch }
-    redraw()
-    return saveCfg($)
-  }
+  const setCfg = (patch) => updateCfg($, (c) => ({ ...c, ...patch }))
   const rangeBtn = (value, label, hotkey) =>
     Button({ key: 'range-' + value, label, hotkey, plain: true, dimColor: cfg.range !== value, onPress: () => setCfg({ range: value }) })
 
@@ -747,10 +792,11 @@ function detailView($, { Box, Text, Button, Input, Select }, now, cols, editingN
             autoFocus: true,
             onSubmit: async (v) => {
               await $.state.set(S_EDITING, false)
-              const names = { ...cfg.names }
-              if (v.trim()) names[acctSel] = v.trim()
-              else delete names[acctSel]
-              return setCfg({ names })
+              return updateCfg($, (c) => {
+                if (v.trim()) c.names[acctSel] = v.trim()
+                else delete c.names[acctSel]
+                return c
+              })
             },
           }),
         ]

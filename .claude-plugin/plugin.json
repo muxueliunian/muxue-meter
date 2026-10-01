@@ -1,7 +1,8 @@
 {
-  "name": "usage-panel",
-  "version": "0.3.0",
-  "description": "TPS, token usage and API-equivalent cost panel for Claude Code (CLI and Desktop)",
+  "name": "muxue-meter",
+  "version": "0.4.0",
+  "description": "TPS, token usage and API-equivalent cost meter for Claude Code (CLI and Desktop)",
   "author": { "name": "muxue" },
+  "repository": "https://github.com/muxueliunian/muxue-meter",
   "types": "./types/index.d.ts"
 }

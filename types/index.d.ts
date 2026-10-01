@@ -1,13 +1,13 @@
-// The $.state values usage-panel keeps for a session (they survive a hot reload).
+// The $.state values muxue-meter keeps for a session (they survive a hot reload).
 
-export type UsagePanelTps = { value: number; model: string }
+export type MuxueMeterTps = { value: number; model: string }
 
 declare module 'claude-code' {
   interface PluginState {
-    'usage-panel': {
+    'muxue-meter': {
       expanded: boolean
       editingName: boolean
-      tps: UsagePanelTps | null
+      tps: MuxueMeterTps | null
     }
   }
 }
