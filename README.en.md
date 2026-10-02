@@ -9,6 +9,7 @@ A Claude Code mod: one line of usage stats above the prompt, plus a details pane
 ```
 
 - Details panel (click "Details" or type `/meter`; it opens above the prompt, not in the sidebar): 1 / 7 / 30 days, filter by account, share by model, average TPS, daily value; tokens shown as K / M / B or exact values
+- Quota estimate (in the details card): works back from how full the 5-hour and weekly limits are to how big they are, `quota ≈ API-equivalent value recorded ÷ the percent it used` (when recording started after the window opened, only the usage after the first reading and the points gained since count, and a figure appears once that is 5 points), shown as "Predicted 5h quota" and "Predicted Week quota"; worked out per account, one group per account. Below 5% used the figure is too coarse, so the last estimate is shown
 - The status line and the details card adapt to the available width: everything when there is room, shorter forms when it gets narrow
 - The UI comes in 10 languages; it follows the system language by default and can be switched from the top right of the details card
 - Values are API-equivalent cost at API prices. The price table is `PRICES` at the top of `hooks/register.js` (checked against the official prices as of 2026-09) and is updated by hand when new models ship; Opus 5 fast mode is billed at 2×
@@ -61,5 +62,6 @@ Then run `/reload-plugins`. To turn the check off, set `UPDATE_URL` at the top o
 ## Known limitations
 
 - Only usage after installation is counted
+- The quota estimate counts only the CLI / app usage this plugin recorded (claude.ai on the web and the like are not counted); quotas are measured at API prices, so the estimate drifts when the model mix changes
 - TPS is `output_tokens ÷ (time from the first content chunk to the end of the response)`; requests that generate for under 0.2 s or under 20 tokens are not counted
 - Before 0.4.0 the plugin was called `usage-panel`; old data is migrated automatically on first start

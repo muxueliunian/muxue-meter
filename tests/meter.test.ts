@@ -27,12 +27,13 @@ type World = {
   files?: Record<string, string>
   store?: Record<string, unknown>
   published?: string | null
+  rateLimits?: { kind: string; percentUsed: number; resetsAt?: string }[]
 }
 
 // Answers every noun the plugin calls beneath it. Files are matched by path suffix, so the
 // same table serves C:\Users\x and /Users/x homes.
 function world(on: On, w: World) {
-  mock.clock(on, { now: NOW })
+  const clock = mock.clock(on, { now: NOW })
   mock.store(on, w.store ?? {})
   mock.env(on, w.env)
   const files: Record<string, string> = { '/.claude-plugin/plugin.json': JSON.stringify({ version: '0.4.0' }), ...(w.files ?? {}) }
@@ -51,6 +52,9 @@ function world(on: On, w: World) {
       : { value: { status: 404, ok: false, headers: {}, text: '' } },
   )
   on('command.register', ($, e) => ({ value: { command: e.name } }))
+  on('session.usage', () => ({ value: { startedAt: NOW, context: { window: 200000 }, rateLimits: w.rateLimits ?? [] } }))
+  on('session.measure', ($, e) => ({ changed: e.changed }))
+  return clock
 }
 
 const start = ($: any, surface: string) => $.session.start({ cwd: '/work', surface, isInteractive: true })
@@ -135,5 +139,294 @@ test('a rename keeps names another session saved meanwhile', async ($, on) => {
   const acct = await ui.find({ key: 'acct' })
   expect(acct?.props.options).toContainEqual({ value: id, label: expect.stringContaining('home') })
   expect(acct?.props.options).toContainEqual({ value: other, label: 'work' })
+  await ui.unmount()
+})
+
+// ---- quota estimate ----------------------------------------------------------------------
+
+const H = 3600000
+const BUCKET = 5 * 60000
+const bucket = (t: number) => String(Math.floor(t / BUCKET))
+const iso = (t: number) => new Date(t).toISOString()
+const enCfg = { names: {}, hints: {}, range: '7', acct: 'all', exact: false, lang: 'en' }
+const measure = ($: any, rateLimits: unknown[]) =>
+  $.session.measure({ context: { window: 200000 }, rateLimits, changed: ['rateLimits'] })
+
+test('quota: value recorded in the window divided by its fill', async ($, on) => {
+  const id = await hash('uuid-desktop')
+  world(on, {
+    env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' },
+    store: {
+      cfg: enCfg,
+      // Another session of the same account: $10 one hour ago, $99 before the 5h window opened.
+      's:old': {
+        upd: NOW,
+        days: {},
+        seen: { [id]: NOW - 10 * 24 * H },
+        b: { [bucket(NOW - H)]: { [id]: { u: 10 } }, [bucket(NOW - 4 * H)]: { [id]: { u: 99 } } },
+      },
+    },
+  })
+  await start($, 'desktop')
+  await measure($, [
+    { kind: 'five_hour', percentUsed: 20, resetsAt: iso(NOW + 2 * H) },
+    { kind: 'seven_day', percentUsed: 2, resetsAt: iso(NOW + 72 * H) },
+  ])
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
+    await ui.press({ key: 'toggle-usage' })
+    await ui.press({ key: 'tab-quota' })
+    expect(await ui.find({ type: 'Text', text: /^Predicted 5h quota \$50\.00$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Predicted Week quota — \(after 3% more\)$/ })).toBeDefined()
+    // Another tab: the quota rows give way, and the collapsed line still carries the fill.
+    await ui.press({ key: 'tab-usage' })
+    expect(await ui.find({ type: 'Text', text: /Predicted/ })).toBeUndefined()
+    await ui.press({ key: 'toggle-usage' })
+    expect(await ui.find({ type: 'Text', text: /· 5h 20% · Week 2%$/ })).toBeDefined()
+    await ui.press({ key: 'toggle-usage' })
+    await ui.press({ key: 'toggle-usage' })
+    await ui.unmount()
+  }
+})
+
+test('quota: recording that started mid-window divides only what came after the first reading', async ($, on) => {
+  const id = await hash('uuid-desktop')
+  world(on, {
+    env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' },
+    store: {
+      cfg: enCfg,
+      // Recording began an hour ago, inside a window already 88% full ($100 before the first
+      // reading at 88%, $5 after it). Dividing $105 by 92% would give a tiny, wrong quota.
+      's:old': {
+        upd: NOW,
+        days: {},
+        seen: { [id]: NOW - H },
+        base: { [id]: { five_hour: { p: 88, r: NOW + 3 * H, at: NOW - 40 * 60000 } } },
+        b: { [bucket(NOW - 50 * 60000)]: { [id]: { u: 100 } }, [bucket(NOW - 20 * 60000)]: { [id]: { u: 5 } } },
+      },
+    },
+  })
+  await start($, 'terminal')
+  // Only 4 points since the first reading: too few to divide by.
+  await measure($, [{ kind: 'five_hour', percentUsed: 92, resetsAt: iso(NOW + 3 * H) }])
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
+    await ui.press({ key: 'toggle-usage' })
+    await ui.press({ key: 'tab-quota' })
+    expect(await ui.find({ type: 'Text', text: /^Predicted 5h quota — \(after 1% more\)$/ })).toBeDefined()
+    await ui.press({ key: 'toggle-usage' })
+    await ui.unmount()
+  }
+  // 10 points since the first reading: $5 / 10% = $50.
+  await measure($, [{ kind: 'five_hour', percentUsed: 98, resetsAt: iso(NOW + 3 * H + 3000) }])
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
+    await ui.press({ key: 'toggle-usage' })
+    await ui.press({ key: 'tab-quota' })
+    expect(await ui.find({ type: 'Text', text: /^Predicted 5h quota \$50\.00$/ })).toBeDefined()
+    await ui.press({ key: 'toggle-usage' })
+    await ui.unmount()
+  }
+})
+
+test('quota: an estimate saved by 0.5.0 drafts (a part divided by the whole fill) is ignored', async ($, on) => {
+  const id = await hash('uuid-desktop')
+  world(on, {
+    env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' },
+    store: { cfg: enCfg, 's:old': { upd: NOW, days: {}, est: { [id]: { seven_day: { q: 1.41, low: true, r: NOW + H, at: NOW - H } } } } },
+  })
+  await start($, 'desktop')
+  await measure($, [{ kind: 'seven_day', percentUsed: 92, resetsAt: iso(NOW + 6 * H) }])
+  const ui = await $.ui.mount({ plugin: 'muxue-meter', surface: 'desktop', ...band() })
+  await ui.press({ key: 'toggle-usage' })
+  await ui.press({ key: 'tab-quota' })
+  expect(await ui.find({ type: 'Text', text: /^Predicted Week quota — \(after 5% more\)$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('tabs are labelled in the chosen language; the toggle and language picker share the top line', async ($, on) => {
+  world(on, { env: { HOME: '/Users/mac' }, store: { cfg: { ...enCfg, lang: 'zh-CN' } } })
+  await start($, 'desktop')
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
+    await ui.press({ key: 'toggle-usage' })
+    for (const [key, label] of [['tab-usage', '概览'], ['tab-quota', '额度'], ['tab-models', '模型'], ['tab-daily', '每日']]) {
+      expect((await ui.find({ key }))?.props.label).toContain(label)
+    }
+    const right = await ui.find({ key: 'usage-right' })
+    expect(right).toBeDefined()
+    expect(await ui.find({ key: 'lang' })).toBeDefined()
+    await ui.press({ key: 'toggle-usage' })
+    expect(await ui.find({ key: 'lang' })).toBeUndefined()
+    await ui.unmount()
+  }
+})
+
+test('quota: each account keeps its own readings; selecting one hides the others', async ($, on) => {
+  const id = await hash('uuid-desktop')
+  const other = await hash('uuid-other')
+  world(on, {
+    env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' },
+    store: {
+      cfg: { ...enCfg, names: { [other]: 'work' } },
+      's:old': {
+        upd: NOW,
+        days: { '2026-10-02': { [other]: { 'claude-opus-5-5': { i: 1, o: 1, cr: 0, cw: 0, n: 1, gms: 0, gtok: 0 } } } },
+        seen: { [other]: NOW - 24 * H },
+        b: { [bucket(NOW - H)]: { [other]: { u: 30 } } },
+        rl: { [other]: { five_hour: { p: 60, r: NOW + H, at: NOW - 10 * 60000 } } },
+      },
+    },
+  })
+  await start($, 'desktop')
+  // This session's account: nothing recorded, so it has no estimate and must not borrow the other's $30.
+  await measure($, [{ kind: 'five_hour', percentUsed: 10, resetsAt: iso(NOW + 4 * H) }])
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
+    await ui.press({ key: 'toggle-usage' })
+    await ui.press({ key: 'tab-quota' })
+    expect(await ui.find({ type: 'Text', text: /^Predicted 5h quota \$50\.00$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Predicted 5h quota — \(after 5% more\)$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /· work$/ })).toBeDefined()
+    await ui.select({ key: 'acct', value: id })
+    expect(await ui.find({ type: 'Text', text: /\$50\.00/ })).toBeUndefined()
+    await ui.select({ key: 'acct', value: 'all' })
+    await ui.press({ key: 'toggle-usage' })
+    await ui.unmount()
+  }
+})
+
+test('quota: a resumed session keeps its own saved estimate', async ($, on) => {
+  const id = await hash('uuid-desktop')
+  world(on, {
+    env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' },
+    store: {
+      cfg: enCfg,
+      's:session-1': { upd: NOW - 6 * H, days: {}, b: {}, seen: { [id]: NOW - 30 * H }, est: { [id]: { five_hour: { q: 42, low: false, r: NOW - 5 * H, at: NOW - 6 * H } } } },
+    },
+  })
+  await start($, 'desktop')
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
+    await ui.press({ key: 'toggle-usage' })
+    await ui.press({ key: 'tab-quota' })
+    expect(await ui.find({ type: 'Text', text: /^Predicted 5h quota \$42\.00$/ })).toBeDefined()
+    await ui.press({ key: 'toggle-usage' })
+    await ui.unmount()
+  }
+})
+
+
+test('quota: a new window starts over; with recording since before it, the whole window counts', async ($, on) => {
+  const id = await hash('uuid-desktop')
+  world(on, {
+    env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' },
+    store: {
+      cfg: enCfg,
+      // The last window ended an hour ago (its baseline at 40%); the new one opened 30 minutes ago.
+      's:old': {
+        upd: NOW,
+        days: {},
+        seen: { [id]: NOW - 30 * H },
+        base: { [id]: { five_hour: { p: 40, r: NOW - H, at: NOW - 3 * H } } },
+        rl: { [id]: { five_hour: { p: 95, r: NOW - H, at: NOW - 2 * H } } },
+        b: { [bucket(NOW - 2 * H)]: { [id]: { u: 70 } }, [bucket(NOW - 20 * 60000)]: { [id]: { u: 6 } } },
+      },
+    },
+  })
+  await start($, 'desktop')
+  await measure($, [{ kind: 'five_hour', percentUsed: 6, resetsAt: iso(NOW + 4.5 * H) }])
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
+    await ui.press({ key: 'toggle-usage' })
+    await ui.press({ key: 'tab-quota' })
+    // $6 in the new window over its 6%; the old window's $70 and its baseline play no part.
+    expect(await ui.find({ type: 'Text', text: /^Predicted 5h quota \$100$/ })).toBeDefined()
+    await ui.press({ key: 'toggle-usage' })
+    await ui.unmount()
+  }
+})
+
+test('a session whose own saved doc is unreadable still counts the other sessions', async ($, on) => {
+  const other = await hash('uuid-other')
+  world(on, {
+    env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' },
+    store: {
+      cfg: enCfg,
+      's:session-1': 'not a doc',
+      's:old': { upd: NOW, days: { '2026-10-02': { [other]: { 'claude-sonnet-5-5': { i: 0, o: 1e6, cr: 0, cw: 0, n: 1, gms: 0, gtok: 0 } } } } },
+    },
+  })
+  await start($, 'desktop')
+  const ui = await $.ui.mount({ plugin: 'muxue-meter', surface: 'desktop', ...band() })
+  await ui.press({ key: 'toggle-usage' })
+  expect(await ui.find({ type: 'Text', text: /API-equivalent value \$10\.00/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('expanded at desktop width: the status line keeps labels instead of the compact form', async ($, on) => {
+  world(on, { env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' }, store: { cfg: { ...enCfg, lang: 'zh-CN' } } })
+  await start($, 'desktop')
+  await measure($, [
+    { kind: 'five_hour', percentUsed: 14, resetsAt: iso(NOW + 2 * H) },
+    { kind: 'seven_day', percentUsed: 92, resetsAt: iso(NOW + 6 * H) },
+  ])
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band(100) })
+    await ui.press({ key: 'toggle-usage' })
+    expect(await ui.find({ type: 'Text', text: /当前会话 \$0\.00 · 今日 \$0\.00 .*5小时 14% · 每周 92%$/ })).toBeDefined()
+    await ui.press({ key: 'toggle-usage' })
+    await ui.unmount()
+  }
+})
+
+test('an impossible speed (a timing glitch) is neither shown nor recorded', async ($, on) => {
+  const clock = world(on, { env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' }, store: { cfg: enCfg } })
+  const usage = { model: 'claude-opus-5-5', input_tokens: 10, output_tokens: 1000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+  // 1000 tokens whose first chunk came 0.5 s before the stop: 2000 tok/s, more than any model streams.
+  on('turn.step', async function* ($: any, e: any, next: any) {
+    await clock.advance(10000)
+    yield { kind: 'text', index: 0, text: 'hi' }
+    await clock.advance(500)
+    yield { kind: 'stop', stopReason: 'end_turn', usage }
+    return { turnId: 't', index: 0, answer: 'hi', toolUses: [], stopReason: 'end_turn', usage }
+  } as any)
+  await start($, 'desktop')
+  const stream: any = $.turn.step({ turnId: 't', index: 0, model: 'claude-opus-5-5', messageCount: 1 } as any)
+  for await (const _ of stream) {
+  }
+  await stream.result
+  const ui = await $.ui.mount({ plugin: 'muxue-meter', surface: 'desktop', ...band() })
+  expect(await ui.find({ type: 'Text', text: /^⚡ — tok\/s · Session \$0\.0\d/ })).toBeDefined()
+  await ui.press({ key: 'toggle-usage' })
+  await ui.press({ key: 'tab-models' })
+  expect(await ui.find({ type: 'Text', text: /t\/s$/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test("a subagent's requests count toward the session, and several at once keep their own timing", async ($, on) => {
+  const clock = world(on, { env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' }, store: { cfg: enCfg } })
+  // Sonnet 5.5 output at $10 per million: 100k tokens = $1.00 per request.
+  const usage = { model: 'claude-sonnet-5-5', input_tokens: 0, output_tokens: 100000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+  on('turn.step', async function* ($: any, e: any, next: any) {
+    yield { kind: 'text', index: 0, text: 'x' }
+    await clock.advance(1000)
+    yield { kind: 'stop', stopReason: 'end_turn', usage }
+    return { turnId: e.turnId, index: e.index, answer: 'x', toolUses: [], stopReason: 'end_turn', usage }
+  } as any)
+  await start($, 'desktop')
+  const run = async (input: any) => {
+    const stream: any = $.turn.step(input)
+    for await (const _ of stream) {
+    }
+    await stream.result
+  }
+  await Promise.all([
+    run({ turnId: 't', index: 0, model: 'claude-sonnet-5-5', messageCount: 1 }),
+    run({ turnId: 't', index: 0, model: 'claude-sonnet-5-5', messageCount: 1, agentId: 'agent-1' }),
+    run({ turnId: 't', index: 0, model: 'claude-sonnet-5-5', messageCount: 1, agentId: 'agent-2' }),
+  ])
+  const ui = await $.ui.mount({ plugin: 'muxue-meter', surface: 'desktop', ...band() })
+  expect(await ui.find({ type: 'Text', text: /Session \$3\.00/ })).toBeDefined()
   await ui.unmount()
 })

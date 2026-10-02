@@ -8,6 +8,7 @@ declare module 'claude-code' {
       expanded: boolean
       editingName: boolean
       tps: MuxueMeterTps | null
+      tab: 'usage' | 'quota' | 'models' | 'daily'
     }
   }
 }

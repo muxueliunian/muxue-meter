@@ -14,6 +14,18 @@ const UPDATE_URL = 'https://raw.githubusercontent.com/muxueliunian/muxue-meter/m
 const UPDATE_EVERY = 6 * 3600000
 const MIN_TPS_MS = 200
 const MIN_TPS_TOKENS = 20
+// Faster than any model streams: a reading above it is a timing glitch, not a speed.
+const MAX_TPS = 1000
+
+// Quota estimate. The engine reports how full each rate-limit window is (percentUsed) and when it
+// resets; the value recorded inside that window divided by its fill gives the window's size in
+// API-equivalent dollars. Usage is kept in BUCKET_MS buckets per account so a window's start can
+// be cut out; buckets older than the longest window are dropped. Below MIN_PCT the fill is too
+// coarse to divide by, and the last good estimate is shown instead.
+const BUCKET_MS = 5 * 60000
+const WINDOWS = { five_hour: 5 * 3600000, seven_day: 7 * 86400000 }
+const BUCKET_KEEP_MS = WINDOWS.seven_day + 86400000
+const MIN_PCT = 5
 
 // USD per million tokens: [input, output, cache write (5 min), cache read].
 // Order matters: the first matching pattern wins. Edit here when prices change.
@@ -65,7 +77,13 @@ const emptyRow = () => ({ i: 0, o: 0, cr: 0, cw: 0, n: 0, gms: 0, gtok: 0 })
 const emptyTotals = () => ({ ...emptyRow(), usd: 0 })
 
 let sid = null // current session id
-let doc = { days: {} } // this session: days[day][acct][model] = row
+// This session: days[day][acct][model] = row; b[bucket][acct] = { u: usd, x: 1 if a model had no
+// price }; rl[acct][kind] = { p: percentUsed, r: resetsAt ms, at }, the latest reading; base[acct][kind]
+// = this session's first reading of that window; est[acct][kind] = { q, r, at }, the last estimate
+// made; seen[acct] = when this session started recording the account.
+const emptyDoc = () => ({ days: {}, b: {}, rl: {}, base: {}, est: {}, seen: {} })
+let doc = emptyDoc()
+let lastTurnAcct = null // account of the last recorded response: the rate-limit readings are its
 let others = {} // other sessions, as last read from the store
 let cfg = { names: {}, hints: {}, range: '7', acct: 'all', exact: false, lang: 'auto' } // see normCfg
 let curAcct = 'unknown'
@@ -79,6 +97,7 @@ let lastFullRefresh = 0
 const S_EXPANDED = { plugin: 'muxue-meter', key: 'expanded' }
 const S_EDITING = { plugin: 'muxue-meter', key: 'editingName' }
 const S_TPS = { plugin: 'muxue-meter', key: 'tps' }
+const S_TAB = { plugin: 'muxue-meter', key: 'tab' }
 
 // ---- helpers that touch the mods API ----------------------------------------------------
 
@@ -146,6 +165,11 @@ async function currentAccount($) {
     curAcct = (await readAccount($)).id
     acctReadAt = now
   }
+  // From here on this session records the account: a window that starts later is fully counted.
+  if (curAcct !== 'unknown' && sid && !doc.seen[curAcct]) {
+    doc.seen[curAcct] = now
+    scheduleFlush($)
+  }
   return curAcct
 }
 
@@ -153,14 +177,20 @@ async function ensureSession($) {
   const id = await $.session.id()
   if (id === sid) return
   sid = id
+  lastTurnAcct = null
   const saved = await $.store.get('s:' + id)
-  doc = saved && saved.days ? { days: saved.days } : { days: {} }
+  doc = emptyDoc()
+  if (saved && saved.days) {
+    for (const k of Object.keys(doc)) if (saved[k] && typeof saved[k] === 'object') doc[k] = saved[k]
+  }
 }
 
 async function flush($) {
   if (!sid) return
   lastFlush = await $.clock.now()
-  await $.store.set('s:' + sid, { upd: lastFlush, days: doc.days })
+  const old = Math.floor((lastFlush - BUCKET_KEEP_MS) / BUCKET_MS)
+  for (const k of Object.keys(doc.b)) if (Number(k) < old) delete doc.b[k]
+  await $.store.set('s:' + sid, { upd: lastFlush, ...doc })
 }
 // Write at most every 2 seconds, and always once more after the last change.
 function scheduleFlush($) {
@@ -281,6 +311,9 @@ async function record($, model, usage, gen) {
   if (!usage) return
   await ensureSession($)
   const day = await today($)
+  // Read afresh, not from the 5-second cache: right after a /login the response, and the
+  // rate-limit readings that follow it, belong to the new account.
+  acctReadAt = 0
   const acct = await currentAccount($)
   const byAcct = (doc.days[day] ||= {})
   const byModel = (byAcct[acct] ||= {})
@@ -290,7 +323,20 @@ async function record($, model, usage, gen) {
   row.cr += usage.cache_read_input_tokens || 0
   row.cw += usage.cache_creation_input_tokens || 0
   row.n += 1
-  if (gen && gen.ms >= MIN_TPS_MS && (usage.output_tokens || 0) >= MIN_TPS_TOKENS) {
+  if (acct !== 'unknown') {
+    const bucket = (doc.b[Math.floor((await $.clock.now()) / BUCKET_MS)] ||= {})
+    const cell = (bucket[acct] ||= { u: 0 })
+    cell.u += rowUsd(model, {
+      i: usage.input_tokens || 0,
+      o: usage.output_tokens || 0,
+      cr: usage.cache_read_input_tokens || 0,
+      cw: usage.cache_creation_input_tokens || 0,
+    })
+    if (!priceOf(model)) cell.x = 1
+    lastTurnAcct = acct
+  }
+  const out = usage.output_tokens || 0
+  if (gen && gen.ms >= MIN_TPS_MS && out >= MIN_TPS_TOKENS && out / (gen.ms / 1000) <= MAX_TPS) {
     row.gms += gen.ms
     row.gtok += usage.output_tokens
     await $.state.set(S_TPS, { value: usage.output_tokens / (gen.ms / 1000), model })
@@ -377,6 +423,127 @@ function sessionTotals() {
   return t
 }
 
+// ---- quota estimate ---------------------------------------------------------------------
+
+const allDocs = () => [...Object.values(others), doc]
+
+// The value an account recorded in buckets overlapping [start, end], over every session.
+function windowUsd(acct, start, end) {
+  let usd = 0
+  let unpriced = false
+  const lo = Math.floor(start / BUCKET_MS)
+  const hi = Math.floor(end / BUCKET_MS)
+  for (const s of allDocs()) {
+    for (const [k, byAcct] of Object.entries(s.b || {})) {
+      const n = Number(k)
+      const c = byAcct[acct]
+      if (!c || n < lo || n > hi) continue
+      usd += c.u || 0
+      if (c.x) unpriced = true
+    }
+  }
+  return { usd, unpriced }
+}
+// When the plugin first recorded the account in any session; Infinity when it never did.
+const seenSince = (acct) => Math.min(Infinity, ...allDocs().map((s) => s.seen?.[acct] ?? Infinity))
+// The newest of a field's entries for an account and window, over every session.
+const newest = (field, acct, kind) =>
+  allDocs()
+    .map((s) => s[field]?.[acct]?.[kind])
+    // low: an estimate from before 0.5.0 that divided a part of the window by all of its fill.
+    .filter((v) => v && typeof v.at === 'number' && !v.low)
+    .sort((a, b) => b.at - a.at)[0] || null
+
+// Two readings of the same window: resetsAt may move by a few seconds between responses.
+const sameWindow = (a, b) => Math.abs(a.r - b.r) < 10 * 60000
+// The earliest first reading any session took of this window.
+const baseline = (acct, kind, rd) =>
+  allDocs()
+    .map((s) => s.base?.[acct]?.[kind])
+    .filter((v) => v && typeof v.at === 'number' && sameWindow(v, rd))
+    .sort((a, b) => a.at - b.at)[0] || null
+
+// A window's size in API-equivalent dollars, from a reading (rd): what was recorded divided by the
+// share of the window it filled. When the plugin was recording since before the window opened,
+// that is the whole window up to the reading (not up to now: what came after is not in the
+// percentage). Otherwise the part before recording began is unknown, and only the change since
+// the first reading counts: the value recorded after it over the points the fill rose since.
+// No estimate until that share is MIN_PCT points, or with nothing recorded.
+function estimate(acct, kind, rd) {
+  const start = rd.r - WINDOWS[kind]
+  let from = start
+  let pts = rd.p
+  if (seenSince(acct) > start) {
+    const base = baseline(acct, kind, rd)
+    if (!base) return { q: null }
+    // The bucket holding the baseline is left out: the response that moved the fill to it is there.
+    from = (Math.floor(base.at / BUCKET_MS) + 1) * BUCKET_MS
+    pts = rd.p - base.p
+  }
+  const { usd } = windowUsd(acct, from, rd.at)
+  if (pts >= MIN_PCT && usd > 0) return { q: usd / (pts / 100) }
+  // How many more points of fill until there is enough to divide by.
+  return { q: null, need: pts < MIN_PCT ? Math.round((MIN_PCT - pts) * 10) / 10 : 0 }
+}
+
+// Readings belong to the account that made the last response; before any response in this
+// session (a reading the engine still holds from startup), to the session's account.
+async function saveReadings($, rateLimits) {
+  const acct = lastTurnAcct || (await currentAccount($))
+  if (acct === 'unknown' || !Array.isArray(rateLimits)) return
+  await ensureSession($)
+  const now = await $.clock.now()
+  let changed = false
+  for (const rl of rateLimits) {
+    const r = Date.parse(rl?.resetsAt || '')
+    if (!WINDOWS[rl?.kind] || !Number.isFinite(r) || typeof rl.percentUsed !== 'number') continue
+    const rd = { p: rl.percentUsed, r, at: now }
+    ;(doc.rl[acct] ||= {})[rl.kind] = rd
+    const base = (doc.base[acct] ||= {})
+    if (!base[rl.kind] || !sameWindow(base[rl.kind], rd)) base[rl.kind] = rd
+    const { q } = estimate(acct, rl.kind, rd)
+    if (q !== null) (doc.est[acct] ||= {})[rl.kind] = { q, r, at: now }
+    changed = true
+  }
+  if (!changed) return
+  dataVersion++
+  scheduleFlush($)
+  $.ui.invalidate('ui.render')
+}
+
+// Per window: the live reading and its estimate (while the window has not reset), and the last
+// estimate made at MIN_PCT or more, which stands in while the fill is too low to divide by.
+const quotaMemo = new Map()
+function quotaRows(acct, now) {
+  const key = acct + '|' + dataVersion + '|' + Math.floor(now / 60000)
+  if (quotaMemo.has(key)) return quotaMemo.get(key)
+  if (quotaMemo.size > 20) quotaMemo.clear()
+  const rows = []
+  for (const kind of Object.keys(WINDOWS)) {
+    const rd = newest('rl', acct, kind)
+    const live = rd && rd.r > now ? rd : null
+    const prev = newest('est', acct, kind)
+    if (!live && !prev) continue
+    rows.push({ kind, live, est: live ? estimate(acct, kind, live) : null, prev })
+  }
+  quotaMemo.set(key, rows)
+  return rows
+}
+// Accounts with a reading or an estimate, the current one first.
+const quotaAccts = () => {
+  const set = new Set()
+  for (const s of allDocs()) for (const f of ['rl', 'est']) for (const a of Object.keys(s[f] || {})) set.add(a)
+  return [...set].sort((a, b) => (b === curAcct) - (a === curAcct) || a.localeCompare(b))
+}
+
+const pctOf = (p) => (Number.isInteger(p) ? p : p.toFixed(1)) + '%'
+const fmtDur = (ms) => {
+  const m = Math.max(0, Math.round(ms / 60000))
+  if (m >= 1440) return Math.floor(m / 1440) + 'd' + Math.floor((m % 1440) / 60) + 'h'
+  if (m >= 60) return Math.floor(m / 60) + 'h' + (m % 60) + 'm'
+  return m + 'm'
+}
+
 const cacheHit = (t) => {
   const denom = t.i + t.cr + t.cw
   return denom > 0 ? t.cr / denom : null
@@ -421,6 +588,8 @@ const STR = {
     tpsAvg: 'Average TPS by model',
     exact: 'Exact', kmb: 'K/M/B', refresh: 'Refresh', cmd: 'Expand or collapse the usage window',
     upd: "New version {v}", updHow: "Update: run git pull in the plugin folder, then /reload-plugins",
+    quota: 'Quota estimate (API-equivalent value)', w5h: '5h', w7d: 'Week', qPred: 'Predicted {w} quota {q}', qNeed: '(after {n} more)', 
+    qEmpty: 'No rate-limit reading yet (subscription accounts only); it appears after your next message.', tUsage: 'Overview', tQuota: 'Quota', tModels: 'Models', tDaily: 'Daily',
   },
   'zh-CN': {
     session: '当前会话', today: '今日', hit: '缓存命中', more: '详情', less: '收起',
@@ -433,6 +602,8 @@ const STR = {
     tpsAvg: '各模型平均 TPS',
     exact: '精确值', kmb: 'K/M/B', refresh: '刷新', cmd: '展开或收起用量小窗口',
     upd: "新版本 {v}", updHow: "更新方法：在插件目录运行 git pull，然后 /reload-plugins",
+    quota: '额度估算（API 等价价值）', w5h: '5小时', w7d: '每周', qPred: '预测{w}额度 {q}', qNeed: '（再用 {n} 后估算）', 
+    qEmpty: '还没有限额读数（仅订阅账户），发一条消息后出现', tUsage: '概览', tQuota: '额度', tModels: '模型', tDaily: '每日',
   },
   'zh-TW': {
     session: '目前工作階段', today: '今日', hit: '快取命中', more: '詳情', less: '收合',
@@ -445,6 +616,8 @@ const STR = {
     tpsAvg: '各模型平均 TPS',
     exact: '精確值', kmb: 'K/M/B', refresh: '重新整理', cmd: '展開或收合用量小視窗',
     upd: "新版本 {v}", updHow: "更新方式：在外掛目錄執行 git pull，然後 /reload-plugins",
+    quota: '額度估算（API 等價價值）', w5h: '5小時', w7d: '每週', qPred: '預測{w}額度 {q}', qNeed: '（再用 {n} 後估算）', 
+    qEmpty: '還沒有限額讀數（僅訂閱帳號），傳送一則訊息後出現', tUsage: '概覽', tQuota: '額度', tModels: '模型', tDaily: '每日',
   },
   ja: {
     session: 'セッション', today: '今日', hit: 'キャッシュ命中', more: '詳細', less: '閉じる',
@@ -457,6 +630,8 @@ const STR = {
     tpsAvg: 'モデル別の平均 TPS',
     exact: '正確な値', kmb: 'K/M/B', refresh: '更新', cmd: '使用量ウィンドウを開閉',
     upd: "新バージョン {v}", updHow: "更新方法：プラグインのフォルダで git pull を実行し、/reload-plugins",
+    quota: '利用枠の推定（API 換算額）', w5h: '5時間', w7d: '週', qPred: '{w}の予測枠 {q}', qNeed: '（あと {n} で推定）', 
+    qEmpty: '上限の読み取りはまだありません（サブスクリプションのみ）。次のメッセージ後に表示されます。', tUsage: '概要', tQuota: '利用枠', tModels: 'モデル', tDaily: '日別',
   },
   ko: {
     session: '현재 세션', today: '오늘', hit: '캐시 적중', more: '자세히', less: '닫기',
@@ -469,6 +644,8 @@ const STR = {
     tpsAvg: '모델별 평균 TPS',
     exact: '정확한 값', kmb: 'K/M/B', refresh: '새로고침', cmd: '사용량 창 열기/닫기',
     upd: "새 버전 {v}", updHow: "업데이트: 플러그인 폴더에서 git pull 실행 후 /reload-plugins",
+    quota: '한도 추정 (API 환산 가치)', w5h: '5시간', w7d: '주간', qPred: '{w} 예상 한도 {q}', qNeed: '({n} 더 사용 후 추정)', 
+    qEmpty: '아직 한도 정보가 없습니다(구독 계정만). 다음 메시지 후 표시됩니다.', tUsage: '개요', tQuota: '한도', tModels: '모델', tDaily: '일별',
   },
   es: {
     session: 'Sesión', today: 'Hoy', hit: 'Acierto de caché', more: 'Detalles', less: 'Cerrar',
@@ -481,6 +658,8 @@ const STR = {
     tpsAvg: 'TPS medio por modelo',
     exact: 'Exacto', kmb: 'K/M/B', refresh: 'Actualizar', cmd: 'Mostrar u ocultar la ventana de uso',
     upd: "Nueva versión {v}", updHow: "Para actualizar: ejecuta git pull en la carpeta del plugin y luego /reload-plugins",
+    quota: 'Cuota estimada (valor equivalente en API)', w5h: '5 h', w7d: 'Semana', qPred: 'Cuota prevista ({w}) {q}', qNeed: '(tras {n} más)', 
+    qEmpty: 'Aún no hay lectura de límites (solo cuentas de suscripción); aparece tras tu próximo mensaje.', tUsage: 'Resumen', tQuota: 'Cuota', tModels: 'Modelos', tDaily: 'Diario',
   },
   de: {
     session: 'Sitzung', today: 'Heute', hit: 'Cache-Treffer', more: 'Details', less: 'Schließen',
@@ -493,6 +672,8 @@ const STR = {
     tpsAvg: 'Durchschnittliche TPS je Modell',
     exact: 'Exakt', kmb: 'K/M/B', refresh: 'Aktualisieren', cmd: 'Nutzungsfenster ein- oder ausklappen',
     upd: "Neue Version {v}", updHow: "Aktualisieren: im Plugin-Ordner git pull ausführen, dann /reload-plugins",
+    quota: 'Kontingent geschätzt (API-Gegenwert)', w5h: '5 Std', w7d: 'Woche', qPred: 'Prognose {w}-Kontingent {q}', qNeed: '(nach weiteren {n})', 
+    qEmpty: 'Noch kein Limit-Wert (nur Abo-Konten); erscheint nach der nächsten Nachricht.', tUsage: 'Übersicht', tQuota: 'Kontingent', tModels: 'Modelle', tDaily: 'Täglich',
   },
   fr: {
     session: 'Session', today: "Aujourd'hui", hit: 'Succès du cache', more: 'Détails', less: 'Fermer',
@@ -505,6 +686,8 @@ const STR = {
     tpsAvg: 'TPS moyen par modèle',
     exact: 'Exact', kmb: 'K/M/B', refresh: 'Actualiser', cmd: "Afficher ou masquer la fenêtre d'utilisation",
     upd: "Nouvelle version {v}", updHow: "Mise à jour : lancez git pull dans le dossier du plugin, puis /reload-plugins",
+    quota: 'Quota estimé (valeur équivalente API)', w5h: '5 h', w7d: 'Semaine', qPred: 'Quota prévu ({w}) {q}', qNeed: '(après {n} de plus)', 
+    qEmpty: 'Pas encore de relevé des limites (comptes abonnés seulement) ; il apparaît après le prochain message.', tUsage: 'Aperçu', tQuota: 'Quota', tModels: 'Modèles', tDaily: 'Par jour',
   },
   pt: {
     session: 'Sessão', today: 'Hoje', hit: 'Acerto de cache', more: 'Detalhes', less: 'Fechar',
@@ -517,6 +700,8 @@ const STR = {
     tpsAvg: 'TPS médio por modelo',
     exact: 'Exato', kmb: 'K/M/B', refresh: 'Atualizar', cmd: 'Expandir ou recolher a janela de uso',
     upd: "Nova versão {v}", updHow: "Para atualizar: execute git pull na pasta do plugin e depois /reload-plugins",
+    quota: 'Cota estimada (valor equivalente na API)', w5h: '5 h', w7d: 'Semana', qPred: 'Cota prevista ({w}) {q}', qNeed: '(após mais {n})', 
+    qEmpty: 'Ainda não há leitura de limites (só contas de assinatura); aparece após a próxima mensagem.', tUsage: 'Resumo', tQuota: 'Cota', tModels: 'Modelos', tDaily: 'Diário',
   },
   ru: {
     session: 'Сессия', today: 'Сегодня', hit: 'Попадания в кэш', more: 'Подробнее', less: 'Закрыть',
@@ -529,6 +714,8 @@ const STR = {
     tpsAvg: 'Средний TPS по моделям',
     exact: 'Точно', kmb: 'K/M/B', refresh: 'Обновить', cmd: 'Показать или скрыть окно использования',
     upd: "Новая версия {v}", updHow: "Обновление: выполните git pull в папке плагина, затем /reload-plugins",
+    quota: 'Оценка лимита (эквивалент по API)', w5h: '5 ч', w7d: 'Неделя', qPred: 'Прогноз лимита ({w}) {q}', qNeed: '(ещё {n})', 
+    qEmpty: 'Данных о лимитах пока нет (только для подписки); появятся после следующего сообщения.', tUsage: 'Обзор', tQuota: 'Лимит', tModels: 'Модели', tDaily: 'По дням',
   },
 }
 
@@ -565,19 +752,30 @@ const toggleExpanded = async ($) => {
 
 export function register(on) {
   on('session.start', async ($, e, next) => {
-    try {
-      await migrateStore($)
+    // Each step on its own: one that fails must not keep the others' data or the timers from
+    // loading, or the band would count this session alone until the next reload.
+    const step = async (fn) => {
+      try {
+        await fn()
+      } catch {}
+    }
+    await step(() => migrateStore($))
+    await step(async () => {
       const saved = await $.store.get('cfg')
       cfg = normCfg(saved && typeof saved === 'object' ? saved : null)
-      autoLang = await detectLang($)
-      await ensureSession($)
-      await currentAccount($)
-      await learnHints($)
-      await refreshOthers($, true)
+    })
+    await step(async () => (autoLang = await detectLang($)))
+    await step(() => ensureSession($))
+    await step(() => currentAccount($))
+    await step(() => learnHints($))
+    await step(() => refreshOthers($, true))
+    // Readings the engine already holds (after a reload); later ones come with session.measure.
+    await step(async () => saveReadings($, (await $.session.usage()).rateLimits))
+    await step(() => {
       checkUpdate($).catch(() => {})
       $.clock.every(3600000, () => checkUpdate($).catch(() => {}))
       $.clock.every(15000, () => refreshOthers($).catch(() => {}))
-    } catch {}
+    })
     try {
       await $.command.register({ name: 'meter', description: tr('cmd'), immediate: true })
     } catch {}
@@ -596,6 +794,16 @@ export function register(on) {
       await flush($)
       sid = null
       await ensureSession($)
+      // The session just left is now one of the others: read it at once so its usage stays counted.
+      await refreshOthers($)
+    } catch {}
+    return next(e)
+  })
+
+  // A rate-limit window moved a whole point (or appeared): keep the reading for the estimate.
+  on('session.measure', async ($, e, next) => {
+    try {
+      if (e.changed.includes('rateLimits')) await saveReadings($, e.rateLimits)
     } catch {}
     return next(e)
   })
@@ -607,7 +815,10 @@ export function register(on) {
     const stream = next(e)
     for await (const c of stream) {
       try {
-        if (!first && (c.kind === 'text' || c.kind === 'thinking' || c.kind === 'tool' || c.kind === 'input')) {
+        // Timing starts at the response's first chunk of any kind (the engine's envelope included),
+        // not its first text: thinking that is not streamed as text would otherwise drop out of
+        // the time while its tokens stay in output_tokens, and the speed would come out tenfold.
+        if (!first && c.kind !== 'stop') {
           first = await $.clock.now()
         } else if (c.kind === 'stop') {
           stopAt = await $.clock.now()
@@ -646,6 +857,7 @@ export function register(on) {
     const cols = e.props.bodyColumns || e.viewport?.columns || 100
     const expanded = (await $.state.get(S_EXPANDED)).value ?? false
     const editingName = (await $.state.get(S_EDITING)).value ?? false
+    const tab = (await $.state.get(S_TAB)).value ?? 'usage'
     const tps = (await $.state.get(S_TPS)).value ?? null
     const now = await $.clock.now()
     const s = sessionTotals()
@@ -659,18 +871,31 @@ export function register(on) {
     const hitText = hit === null ? '—' : fmtPct(hit)
     const tpsText = tps ? tps.value.toFixed(1) + ' tok/s' : '— tok/s'
     const todayLabel = tr('today') + (multi ? ' (' + acctName(curAcct) + ')' : '')
+    // The current account's rate-limit fill, "5h 6% · Week 91%", while a window is live.
+    const fills = curAcct === 'unknown' ? [] : quotaRows(curAcct, now).filter((q) => q.live)
+    const fillWide = fills.map((q) => tr(q.kind === 'five_hour' ? 'w5h' : 'w7d') + ' ' + pctOf(q.live.p))
+    const fillShort = fills.length ? [fills.map((q) => pctOf(q.live.p)).join('/')] : []
+    const full = [
+      '⚡ ' + (tps ? shortModel(tps.model) + ' ' : '') + tpsText,
+      tr('session') + ' ' + usdOf(s),
+      todayLabel + ' ' + usdOf(day),
+      tr('hit') + ' ' + hitText,
+    ]
+    const mid = ['⚡ ' + tpsText, tr('session') + ' ' + usdOf(s), tr('today') + ' ' + usdOf(day), tr('hit') + ' ' + hitText]
+    const compact = ['⚡' + (tps ? tps.value.toFixed(0) : '—'), usdOf(s) + '/' + usdOf(day), hitText]
+    // Narrower and narrower: the model name, then the cache hit, go before the fills; the cryptic
+    // compact form is the last resort.
     const variants = [
-      [
-        '⚡ ' + (tps ? shortModel(tps.model) + ' ' : '') + tpsText,
-        tr('session') + ' ' + usdOf(s),
-        todayLabel + ' ' + usdOf(day),
-        tr('hit') + ' ' + hitText,
-      ],
-      ['⚡ ' + tpsText, tr('session') + ' ' + usdOf(s), tr('today') + ' ' + usdOf(day), tr('hit') + ' ' + hitText],
-      ['⚡' + (tps ? tps.value.toFixed(0) : '—'), usdOf(s) + '/' + usdOf(day), hitText],
+      [...full, ...fillWide],
+      [...mid, ...fillWide],
+      [...mid.slice(0, 3), ...fillWide],
+      [...mid.slice(0, 3), ...fillShort],
+      [...compact, ...fillShort],
+      compact,
     ].map((p) => p.join(' · '))
     const badge = latest ? strWidth('⬆ ' + tr('upd', { v: 'v' + latest })) + 2 : 0
-    const room = cols - strWidth(toggleLabel) - 4 - badge
+    const langW = expanded ? strWidth(cfg.lang === 'auto' ? 'Auto · ' + LANG_NAMES[autoLang] : LANG_NAMES[cfg.lang] || '') + 8 : 0
+    const room = cols - strWidth(toggleLabel) - 4 - badge - langW
     const status = variants.find((v) => strWidth(v) <= room) || variants[variants.length - 1]
 
     const left = Box({
@@ -680,48 +905,55 @@ export function register(on) {
       children: [
         Text({ dimColor: true, wrap: 'truncate-end', children: [status] }),
         ...(latest ? [Text({ color: 'yellow', children: ['⬆ ' + tr('upd', { v: 'v' + latest })] })] : []),
-        Button({ key: 'toggle-usage', label: toggleLabel, plain: true, onPress: () => toggleExpanded($) }),
       ],
     })
 
-    // The language picker (a drop-down) sits at the right end of the top line while the card is open.
+    // At the right end of the top line: the language picker while the card is open, then the toggle.
     const langOptions = [
       { value: 'auto', label: 'Auto · ' + LANG_NAMES[autoLang] },
       ...LANG_ORDER.map((code) => ({ value: code, label: LANG_NAMES[code] })),
     ]
-    const line = expanded
-      ? Box({
-          key: 'usage-line',
-          flexDirection: 'row',
-          flexWrap: 'wrap',
-          justifyContent: 'space-between',
-          children: [
-            left,
-            Select({
-              key: 'lang',
-              label: '🌐',
-              options: langOptions,
-              value: cfg.lang,
-              onSelect: (v) => {
-                return updateCfg($, (c) => ({ ...c, lang: v }))
-              },
-            }),
-          ],
-        })
-      : left
+    const right = Box({
+      key: 'usage-right',
+      flexDirection: 'row',
+      columnGap: 2,
+      children: [
+        ...(expanded
+          ? [
+              Select({
+                key: 'lang',
+                label: '🌐',
+                options: langOptions,
+                value: cfg.lang,
+                onSelect: (v) => updateCfg($, (c) => ({ ...c, lang: v })),
+              }),
+            ]
+          : []),
+        Button({ key: 'toggle-usage', label: toggleLabel, plain: true, onPress: () => toggleExpanded($) }),
+      ],
+    })
+    const line = Box({
+      key: 'usage-line',
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      columnGap: 2,
+      children: [left, right],
+    })
 
     const children = [line]
     if (expanded && latest) children.push(Text({ color: 'yellow', children: [tr('updHow')] }))
-    if (expanded) children.push(detailView($, els, now, cols, editingName))
+    if (expanded) children.push(detailView($, els, now, cols, editingName, tab))
     const rest = await next(e)
     if (rest) children.push(rest)
     return children.length === 1 ? line : Box({ flexDirection: 'column', children })
   })
 }
 
-// The expanded card: range, account, totals, per-model share, per-day value.
+// The expanded card: a row of tabs, then range and account, then one tab's content: totals,
+// quota estimate, per-model share and TPS, or per-day value. One tab at a time keeps the card
+// within the band's rows (a taller tree scrolls inside the band).
 // cols is the band's width; the card's inside is 4 cells narrower (border and padding).
-function detailView($, { Box, Text, Button, Input, Select }, now, cols, editingName) {
+function detailView($, { Box, Text, Button, Input, Select }, now, cols, editingName, tab) {
   const inner = Math.max(30, cols - 4)
   const wide = inner >= 66
   const range = Number(cfg.range)
@@ -753,10 +985,32 @@ function detailView($, { Box, Text, Button, Input, Select }, now, cols, editingN
   const rangeBtn = (value, label, hotkey) =>
     Button({ key: 'range-' + value, label, hotkey, plain: true, dimColor: cfg.range !== value, onPress: () => setCfg({ range: value }) })
 
+  const TABS = [
+    ['usage', 'tUsage'],
+    ['quota', 'tQuota'],
+    ['models', 'tModels'],
+    ['daily', 'tDaily'],
+  ]
+  const tabs = Box({
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    columnGap: 2,
+    children: TABS.map(([id, label]) =>
+      Button({
+        key: 'tab-' + id,
+        label: (tab === id ? '▸ ' : '  ') + tr(label),
+        plain: true,
+        dimColor: tab !== id,
+        onPress: async () => {
+          await $.state.set(S_EDITING, false)
+          await $.state.set(S_TAB, id)
+        },
+      }),
+    ),
+  })
+  // The quota windows are the engine's own, so the day range does not apply to that tab.
   const headerItems = [
-    rangeBtn('1', tr('d1'), '1'),
-    rangeBtn('7', tr('d7'), '2'),
-    rangeBtn('30', tr('d30'), '3'),
+    ...(tab === 'quota' ? [] : [rangeBtn('1', tr('d1'), '1'), rangeBtn('7', tr('d7'), '2'), rangeBtn('30', tr('d30'), '3')]),
     Select({
       key: 'acct',
       label: tr('acct'),
@@ -804,8 +1058,36 @@ function detailView($, { Box, Text, Button, Input, Select }, now, cols, editingN
 
   const card = (children) => Box({ flexDirection: 'column', borderStyle: 'round', paddingX: 1, children })
 
+  // Quota estimate, per account with a reading: the selected one, or all of them under "all".
+  // A row: predicted quota, fill, bar. While the fill is too low to divide by (or the
+  // window has reset) the last estimate stands in; with none at all the value is "—".
+  const quota = []
+  const qAccts = quotaAccts().filter((a) => acctSel === 'all' || a === acctSel)
+  for (const a of qAccts) {
+    const rows = quotaRows(a, now)
+    if (!rows.length) continue
+    quota.push(Text({ bold: true, children: [tr('quota') + (qAccts.length > 1 || acctSel === 'all' ? ' · ' + acctName(a) : '')] }))
+    for (const { kind, live, est, prev } of rows) {
+      const w = tr(kind === 'five_hour' ? 'w5h' : 'w7d')
+      const q = est?.q ?? prev?.q ?? null
+      const need = q === null && est?.need ? ' ' + tr('qNeed', { n: pctOf(est.need) }) : ''
+      const barW = Math.max(6, Math.min(20, Math.floor(inner / 5)))
+      const text = tr('qPred', { w, q: q === null ? '—' : fmtUsd(q) }) + need
+      quota.push(
+        row([
+          cell(Math.max(10, Math.min(28, inner - 6 - barW - 2)), text),
+          num(6, live ? pctOf(live.p) : '—'),
+          bar(barW, live ? Math.min(1, live.p / 100) : 0),
+        ]),
+      )
+    }
+  }
+  if (!quota.length) quota.push(Text({ dimColor: true, wrap: 'wrap', children: [tr('qEmpty')] }))
+
+  const top = [tabs, header, ...rename]
+  if (tab === 'quota') return card([...top, ...quota])
   // Nothing recorded yet: say so in one line instead of drawing empty tables.
-  if (t.n === 0) return card([header, ...rename, Text({ dimColor: true, children: [tr('nodata', { n: range })] })])
+  if (t.n === 0) return card([...top, Text({ dimColor: true, children: [tr('nodata', { n: range })] })])
 
   // Totals: three columns when there is room, two otherwise.
   // The API splits a request's input three ways: cache read, cache write and the rest after
@@ -858,7 +1140,7 @@ function detailView($, { Box, Text, Button, Input, Select }, now, cols, editingN
   const tpsSection = tpsRows.length ? [Text({ bold: true, children: [tr('tpsAvg')] }), ...tpsRows] : []
 
   let daily = []
-  if (range > 1) {
+  {
     const dayList = []
     for (let k = range - 1; k >= 0; k--) dayList.push(dayKey(new Date(now - k * 86400000)))
     const withData = dayList.filter((d) => (agg.byDay[d] || 0) > 0)
@@ -872,5 +1154,7 @@ function detailView($, { Box, Text, Button, Input, Select }, now, cols, editingN
     }
   }
 
-  return card([header, ...rename, ...summary, Text({ bold: true, children: [tr('models')] }), ...modelRows, ...tpsSection, ...daily])
+  if (tab === 'models') return card([...top, Text({ bold: true, children: [tr('models')] }), ...modelRows, ...tpsSection])
+  if (tab === 'daily') return card([...top, ...daily])
+  return card([...top, ...summary])
 }
