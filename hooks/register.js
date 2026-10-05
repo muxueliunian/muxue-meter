@@ -18,10 +18,11 @@ const MIN_TPS_TOKENS = 20
 const MAX_TPS = 1000
 
 // Quota estimate. The engine reports how full each rate-limit window is (percentUsed) and when it
-// resets; the value recorded inside that window divided by its fill gives the window's size in
-// API-equivalent dollars. Usage is kept in BUCKET_MS buckets per account so a window's start can
-// be cut out; buckets older than the longest window are dropped. Below MIN_PCT the fill is too
-// coarse to divide by, and the last good estimate is shown instead.
+// resets; the value recorded between two readings of a window divided by the points its fill rose
+// gives the window's size in API-equivalent dollars. Usage is kept in BUCKET_MS buckets per
+// account so the span between readings can be cut out; buckets older than the longest window are
+// dropped. Below MIN_PCT points the rise is too coarse to divide by, and the last good estimate is
+// shown instead.
 const BUCKET_MS = 5 * 60000
 const WINDOWS = { five_hour: 5 * 3600000, seven_day: 7 * 86400000 }
 const BUCKET_KEEP_MS = WINDOWS.seven_day + 86400000
@@ -79,9 +80,9 @@ const emptyTotals = () => ({ ...emptyRow(), usd: 0 })
 let sid = null // current session id
 // This session: days[day][acct][model] = row; b[bucket][acct] = { u: usd, x: 1 if a model had no
 // price }; rl[acct][kind] = { p: percentUsed, r: resetsAt ms, at }, the latest reading; base[acct][kind]
-// = this session's first reading of that window; est[acct][kind] = { q, r, at }, the last estimate
-// made; seen[acct] = when this session started recording the account.
-const emptyDoc = () => ({ days: {}, b: {}, rl: {}, base: {}, est: {}, seen: {} })
+// = this session's first reading of that window; est[acct][kind] = { q, r, at, d }, the last estimate
+// made. src (beside them): where the session's account came from, 'env' or 'file' (see readAccount).
+const emptyDoc = () => ({ days: {}, b: {}, rl: {}, base: {}, est: {} })
 let doc = emptyDoc()
 let lastTurnAcct = null // account of the last recorded response: the rate-limit readings are its
 let others = {} // other sessions, as last read from the store
@@ -139,11 +140,11 @@ async function readCliAccount($) {
 async function readAccount($) {
   try {
     const uuid = await $.env.get('CLAUDE_CODE_ACCOUNT_UUID')
-    if (uuid) return { id: await hashId(uuid), hint: maskEmail((await $.env.get('CLAUDE_CODE_USER_EMAIL')) || '') }
+    if (uuid) return { id: await hashId(uuid), hint: maskEmail((await $.env.get('CLAUDE_CODE_USER_EMAIL')) || ''), src: 'env' }
     const cli = await readCliAccount($)
-    if (cli) return { id: await hashId(cli.uuid), hint: maskEmail(cli.email) }
+    if (cli) return { id: await hashId(cli.uuid), hint: maskEmail(cli.email), src: 'file' }
   } catch {}
-  return { id: 'unknown', hint: '' }
+  return { id: 'unknown', hint: '', src: null }
 }
 // Remembers the masked e-mail of the session's account and of the CLI's account, so each
 // shows up under a recognisable label even before it has been renamed.
@@ -162,13 +163,15 @@ async function learnHints($) {
 async function currentAccount($) {
   const now = await $.clock.now()
   if (now - acctReadAt > 5000) {
-    curAcct = (await readAccount($)).id
+    const a = await readAccount($)
+    curAcct = a.id
     acctReadAt = now
-  }
-  // From here on this session records the account: a window that starts later is fully counted.
-  if (curAcct !== 'unknown' && sid && !doc.seen[curAcct]) {
-    doc.seen[curAcct] = now
-    scheduleFlush($)
+    // ~/.claude.json can name another account than the CLI's credentials: see acctFixes.
+    if (sid && a.src && doc.src !== a.src) {
+      doc.src = a.src
+      dataVersion++
+      scheduleFlush($)
+    }
   }
   return curAcct
 }
@@ -182,7 +185,9 @@ async function ensureSession($) {
   doc = emptyDoc()
   if (saved && saved.days) {
     for (const k of Object.keys(doc)) if (saved[k] && typeof saved[k] === 'object') doc[k] = saved[k]
+    if (saved.src === 'env' || saved.src === 'file') doc.src = saved.src
   }
+  dataVersion++
 }
 
 async function flush($) {
@@ -359,7 +364,7 @@ function lastDays(n, now) {
 let dataVersion = 0
 const aggMemo = new Map()
 function aggregate(range, acctSel, now) {
-  const key = range + '|' + acctSel + '|' + dayKey(new Date(now)) + '|' + curAcct + '|' + dataVersion
+  const key = range + '|' + acctSel + '|' + dayKey(new Date(now)) + '|' + shownAcct() + '|' + dataVersion
   if (!aggMemo.has(key)) {
     if (aggMemo.size > 20) aggMemo.clear()
     aggMemo.set(key, aggregateNow(range, acctSel, now))
@@ -372,8 +377,7 @@ function aggregateNow(range, acctSel, now) {
   const byModel = {}
   const byDay = {}
   const accts = new Set()
-  const sources = [...Object.values(others), doc]
-  for (const s of sources) {
+  for (const s of allDocs()) {
     for (const [day, byAcct] of Object.entries(s.days || {})) {
       for (const [acct, models] of Object.entries(byAcct)) {
         accts.add(acct)
@@ -399,7 +403,8 @@ function aggregateNow(range, acctSel, now) {
     }
   }
   // The current account is listed even before it has recorded anything.
-  if (curAcct !== 'unknown') accts.add(curAcct)
+  const cur = shownAcct()
+  if (cur !== 'unknown') accts.add(cur)
   return { tot, byModel, byDay, accts: [...accts].sort() }
 }
 
@@ -425,7 +430,96 @@ function sessionTotals() {
 
 // ---- quota estimate ---------------------------------------------------------------------
 
-const allDocs = () => [...Object.values(others), doc]
+// ---- account check ----
+// A CLI session takes its account from ~/.claude.json, which can name another account than the
+// credentials the CLI really uses; its usage and readings then land under the wrong account. The
+// seven-day window tells accounts apart: its reset time is the account's own and stays put for a
+// week, so one account cannot hold two overlapping weeks. When it does, the week that a session
+// with the account from CLAUDE_CODE_ACCOUNT_UUID (src 'env') saw, or else the one no other
+// account also holds, is the account's; a session holding the other week is moved to the account
+// that week belongs to, or, when none is known, its quota data is left out (its tokens stay).
+const weeksOf = (s, a) =>
+  [s.rl?.[a]?.seven_day, s.base?.[a]?.seven_day].filter((v) => v && typeof v.r === 'number').map((v) => v.r)
+// Two different weeks of one account that overlap: impossible for the same account.
+const clash = (r1, r2) => !sameWindow({ r: r1 }, { r: r2 }) && Math.abs(r1 - r2) < WINDOWS.seven_day - 10 * 60000
+
+// Map(doc -> { acct: true account, or null when unknown }) for the docs filed under a wrong one.
+function acctFixes(docs) {
+  const claims = []
+  for (const s of docs) {
+    const accts = new Set([...Object.keys(s.rl || {}), ...Object.keys(s.base || {})])
+    for (const a of accts) for (const r of weeksOf(s, a)) claims.push({ s, a, r, env: s.src === 'env' })
+  }
+  const heldByOther = (c) => claims.some((d) => d.a !== c.a && sameWindow(d, c))
+  const fixes = new Map()
+  for (const c of claims) {
+    if (c.env) continue
+    const wrong = claims.some((d) => d.a === c.a && clash(c.r, d.r) && (d.env || (heldByOther(c) && !heldByOther(d))))
+    if (!wrong) continue
+    const owners = claims.filter((d) => d.a !== c.a && sameWindow(d, c)).sort((x, y) => y.env - x.env)
+    const fix = (fixes.get(c.s) || {})
+    fix[c.a] = owners[0]?.a ?? null
+    fixes.set(c.s, fix)
+  }
+  return fixes
+}
+
+// A copy of a doc with each fixed account's entries filed under the true one (or, for an unknown
+// one, its tokens kept and its quota data dropped).
+function refiled(s, fix) {
+  // Tokens of an account whose true one is unknown stay where they are.
+  const known = Object.fromEntries(Object.entries(fix).filter(([, to]) => to))
+  const move = (byAcct, map, merge) => {
+    const out = { ...byAcct }
+    for (const [from, to] of Object.entries(map)) {
+      if (!(from in out)) continue
+      const v = out[from]
+      delete out[from]
+      if (to) out[to] = to in out ? merge(out[to], v) : v
+    }
+    return out
+  }
+  const sumRows = (x, y) => {
+    const out = { ...x }
+    for (const [m, r] of Object.entries(y)) {
+      const t = out[m] || emptyRow()
+      out[m] = Object.fromEntries(Object.keys(emptyRow()).map((k) => [k, (t[k] || 0) + (r[k] || 0)]))
+    }
+    return out
+  }
+  const sumCell = (x, y) => ({ u: (x.u || 0) + (y.u || 0), ...(x.x || y.x ? { x: 1 } : {}) })
+  const newest = (x, y) => {
+    const out = { ...x }
+    for (const [k, v] of Object.entries(y)) if (!out[k] || (v?.at || 0) > (out[k].at || 0)) out[k] = v
+    return out
+  }
+  const each = (o, fn) => Object.fromEntries(Object.entries(o || {}).map(([k, v]) => [k, fn(v)]))
+  return {
+    ...s,
+    days: each(s.days, (byAcct) => move(byAcct, known, sumRows)),
+    b: each(s.b, (byAcct) => move(byAcct, fix, sumCell)),
+    rl: move(s.rl || {}, fix, newest),
+    base: move(s.base || {}, fix, newest),
+    est: move(s.est || {}, fix, newest),
+  }
+}
+
+// Every session's doc, this one included, with the account fixes applied.
+let viewMemo = { v: -1, docs: [], fixes: new Map() }
+function allDocs() {
+  if (viewMemo.v !== dataVersion) {
+    const docs = [...Object.values(others), doc]
+    const fixes = acctFixes(docs)
+    viewMemo = { v: dataVersion, fixes, docs: docs.map((s) => (fixes.has(s) ? refiled(s, fixes.get(s)) : s)) }
+  }
+  return viewMemo.docs
+}
+// The account this session really runs on: curAcct unless the check above moved it.
+const shownAcct = () => {
+  allDocs()
+  const to = viewMemo.fixes.get(doc)?.[curAcct]
+  return to === undefined ? curAcct : to || 'unknown'
+}
 
 // The value an account recorded in buckets overlapping [start, end], over every session.
 function windowUsd(acct, start, end) {
@@ -444,14 +538,13 @@ function windowUsd(acct, start, end) {
   }
   return { usd, unpriced }
 }
-// When the plugin first recorded the account in any session; Infinity when it never did.
-const seenSince = (acct) => Math.min(Infinity, ...allDocs().map((s) => s.seen?.[acct] ?? Infinity))
 // The newest of a field's entries for an account and window, over every session.
 const newest = (field, acct, kind) =>
   allDocs()
     .map((s) => s[field]?.[acct]?.[kind])
-    // low: an estimate from before 0.5.0 that divided a part of the window by all of its fill.
-    .filter((v) => v && typeof v.at === 'number' && !v.low)
+    // An estimate without d (delta) is from before 0.5.1, which could divide the whole window,
+    // usage it never saw included, by its fill: those are left out.
+    .filter((v) => v && typeof v.at === 'number' && (field !== 'est' || v.d))
     .sort((a, b) => b.at - a.at)[0] || null
 
 // Two readings of the same window: resetsAt may move by a few seconds between responses.
@@ -463,24 +556,18 @@ const baseline = (acct, kind, rd) =>
     .filter((v) => v && typeof v.at === 'number' && sameWindow(v, rd))
     .sort((a, b) => a.at - b.at)[0] || null
 
-// A window's size in API-equivalent dollars, from a reading (rd): what was recorded divided by the
-// share of the window it filled. When the plugin was recording since before the window opened,
-// that is the whole window up to the reading (not up to now: what came after is not in the
-// percentage). Otherwise the part before recording began is unknown, and only the change since
-// the first reading counts: the value recorded after it over the points the fill rose since.
-// No estimate until that share is MIN_PCT points, or with nothing recorded.
+// A window's size in API-equivalent dollars, from a reading (rd): the value recorded since the
+// window's first reading divided by the points the fill rose since. Only that span counts: before
+// the first reading the plugin may not have been recording (no session open, or usage elsewhere,
+// such as claude.ai, that fills the same window), and the window's start is known only roughly.
+// No estimate until the rise is MIN_PCT points, or with nothing recorded.
 function estimate(acct, kind, rd) {
-  const start = rd.r - WINDOWS[kind]
-  let from = start
-  let pts = rd.p
-  if (seenSince(acct) > start) {
-    const base = baseline(acct, kind, rd)
-    if (!base) return { q: null }
-    // The bucket holding the baseline is left out: the response that moved the fill to it is there.
-    from = (Math.floor(base.at / BUCKET_MS) + 1) * BUCKET_MS
-    pts = rd.p - base.p
-  }
-  const { usd } = windowUsd(acct, from, rd.at)
+  const base = baseline(acct, kind, rd)
+  if (!base) return { q: null }
+  // The bucket holding the baseline is left out: the response that moved the fill to it is there.
+  const from = (Math.floor(base.at / BUCKET_MS) + 1) * BUCKET_MS
+  const pts = rd.p - base.p
+  const { usd } = from <= rd.at ? windowUsd(acct, from, rd.at) : { usd: 0 }
   if (pts >= MIN_PCT && usd > 0) return { q: usd / (pts / 100) }
   // How many more points of fill until there is enough to divide by.
   return { q: null, need: pts < MIN_PCT ? Math.round((MIN_PCT - pts) * 10) / 10 : 0 }
@@ -501,11 +588,20 @@ async function saveReadings($, rateLimits) {
     ;(doc.rl[acct] ||= {})[rl.kind] = rd
     const base = (doc.base[acct] ||= {})
     if (!base[rl.kind] || !sameWindow(base[rl.kind], rd)) base[rl.kind] = rd
-    const { q } = estimate(acct, rl.kind, rd)
-    if (q !== null) (doc.est[acct] ||= {})[rl.kind] = { q, r, at: now }
     changed = true
   }
   if (!changed) return
+  dataVersion++
+  // Estimated under the account the readings really belong to (see acctFixes), kept under this
+  // session's own label like the rest of its doc.
+  allDocs()
+  const to = viewMemo.fixes.get(doc)?.[acct]
+  const real = to === undefined ? acct : to
+  for (const [kind, rd] of real ? Object.entries(doc.rl[acct]) : []) {
+    if (rd.at !== now) continue
+    const { q } = estimate(real, kind, rd)
+    if (q !== null) (doc.est[acct] ||= {})[kind] = { q, r: rd.r, at: now, d: 1 }
+  }
   dataVersion++
   scheduleFlush($)
   $.ui.invalidate('ui.render')
@@ -533,7 +629,8 @@ function quotaRows(acct, now) {
 const quotaAccts = () => {
   const set = new Set()
   for (const s of allDocs()) for (const f of ['rl', 'est']) for (const a of Object.keys(s[f] || {})) set.add(a)
-  return [...set].sort((a, b) => (b === curAcct) - (a === curAcct) || a.localeCompare(b))
+  const cur = shownAcct()
+  return [...set].sort((a, b) => (b === cur) - (a === cur) || a.localeCompare(b))
 }
 
 const pctOf = (p) => (Number.isInteger(p) ? p : p.toFixed(1)) + '%'
@@ -741,7 +838,7 @@ async function detectLang($) {
 
 // An account's name: the one given by renaming, else its masked e-mail, else "Account xxxx".
 const acctName = (a) => cfg.names[a] || (cfg.hints || {})[a] || tr('acctN', { id: a.slice(0, 4) })
-const acctLabel = (a) => acctName(a) + (a === curAcct ? ' (' + tr('cur') + ')' : '')
+const acctLabel = (a) => acctName(a) + (a === shownAcct() ? ' (' + tr('cur') + ')' : '')
 
 const toggleExpanded = async ($) => {
   await $.state.set(S_EXPANDED, !((await $.state.get(S_EXPANDED)).value ?? false))
@@ -861,7 +958,8 @@ export function register(on) {
     const tps = (await $.state.get(S_TPS)).value ?? null
     const now = await $.clock.now()
     const s = sessionTotals()
-    const dayAgg = aggregate(1, curAcct === 'unknown' ? 'all' : curAcct, now)
+    const cur = shownAcct()
+    const dayAgg = aggregate(1, cur === 'unknown' ? 'all' : cur, now)
     const day = dayAgg.tot
     const hit = cacheHit(s)
     const multi = dayAgg.accts.length > 1
@@ -870,9 +968,9 @@ export function register(on) {
     // The status text at three widths; the widest that fits beside the toggle is shown.
     const hitText = hit === null ? '—' : fmtPct(hit)
     const tpsText = tps ? tps.value.toFixed(1) + ' tok/s' : '— tok/s'
-    const todayLabel = tr('today') + (multi ? ' (' + acctName(curAcct) + ')' : '')
+    const todayLabel = tr('today') + (multi ? ' (' + acctName(cur) + ')' : '')
     // The current account's rate-limit fill, "5h 6% · Week 91%", while a window is live.
-    const fills = curAcct === 'unknown' ? [] : quotaRows(curAcct, now).filter((q) => q.live)
+    const fills = cur === 'unknown' ? [] : quotaRows(cur, now).filter((q) => q.live)
     const fillWide = fills.map((q) => tr(q.kind === 'five_hour' ? 'w5h' : 'w7d') + ' ' + pctOf(q.live.p))
     const fillShort = fills.length ? [fills.map((q) => pctOf(q.live.p)).join('/')] : []
     const full = [
