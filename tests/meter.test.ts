@@ -14,6 +14,8 @@ const band = (columns = 120) =>
     props: { hasSurvey: false, isWorking: false, maxRows: 30, bodyColumns: columns, scroll: { offset: 0, bodyRows: 30 }, view: {} },
   }) as const
 
+const footer = () => ({ component: 'SessionMode', props: { modes: ['focus'] } }) as const
+
 const hash = async (uuid: string) => {
   const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(uuid))
   return Array.from(new Uint8Array(buf))
@@ -96,6 +98,12 @@ test('a newer published version shows the update badge', async ($, on) => {
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
     expect(await ui.find({ type: 'Text', text: /v0\.5\.0/ })).toBeDefined()
+    // The command is shown in the card only, never run.
+    expect(await ui.find({ type: 'Code' })).toBeUndefined()
+    await ui.press({ key: 'upd' })
+    const cmd = await ui.find({ type: 'Code' })
+    expect(cmd?.props.source).toMatch(/^git -C ".+" pull --ff-only$/)
+    await ui.press({ key: 'view-brief' })
     await ui.unmount()
   }
 })
@@ -120,7 +128,7 @@ test('narrow band: the status line drops to its compact form', async ($, on) => 
   }
 })
 
-test('view switch: hidden shows only the switch, brief the status line, full the card', async ($, on) => {
+test('view switch: hidden leaves the band to an entry in the footer, brief the status line, full the card', async ($, on) => {
   world(on, { env: { HOME: '/Users/mac' }, store: { cfg: { names: {}, hints: {}, range: '7', acct: 'all', exact: false, lang: 'en' } } })
   await start($, 'desktop')
   for (const surface of SURFACES) {
@@ -129,9 +137,16 @@ test('view switch: hidden shows only the switch, brief the status line, full the
     // Brief by default: the status line, no card.
     expect(await ui.find({ type: 'Text', text: /Session \$/ })).toBeDefined()
     expect(await ui.find({ key: 'acct' })).toBeUndefined()
+    const foot = await $.ui.mount({ plugin: 'muxue-meter', surface, ...footer() })
+    expect(await foot.find({ key: 'meter-show' })).toBeUndefined()
     await ui.press({ key: 'view-hidden' })
     expect(await ui.find({ type: 'Text', text: /Session \$/ })).toBeUndefined()
-    expect(await ui.find({ key: 'view-brief' })).toBeDefined()
+    expect(await ui.find({ key: 'view-brief' })).toBeUndefined()
+    // The footer entry brings the status line back.
+    await foot.press({ key: 'meter-show' })
+    expect(await foot.find({ key: 'meter-show' })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /Session \$/ })).toBeDefined()
+    await foot.unmount()
     await ui.press({ key: 'view-full' })
     expect(await ui.find({ type: 'Text', text: /Session \$/ })).toBeDefined()
     expect(await ui.find({ key: 'acct' })).toBeDefined()

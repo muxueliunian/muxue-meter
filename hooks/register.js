@@ -286,6 +286,9 @@ const newer = (a, b) => {
   return false
 }
 
+// The command the card shows for an update, for the person to copy and run themselves.
+const updateCommand = ($) => 'git -C "' + $.plugin.root + '" pull --ff-only'
+
 async function checkUpdate($) {
   if (!UPDATE_URL) return
   if (!version) {
@@ -684,7 +687,7 @@ const STR = {
     models: 'Share by model (by value)', nopr: 'no price', daily: 'Daily value',
     tpsAvg: 'Average TPS by model',
     exact: 'Exact', kmb: 'K/M/B', refresh: 'Refresh', cmd: 'Expand or collapse the usage window',
-    upd: "New version {v}", updHow: "Update: run git pull in the plugin folder, then /reload-plugins",
+    upd: "New version {v}", updHow: "Update: run this in a terminal, then /reload-plugins", updShow: "How to update",
     quota: 'Quota estimate (API-equivalent value)', w5h: '5h', w7d: 'Week', qPred: 'Predicted {w} quota {q}', qNeed: '(after {n} more)', 
     qEmpty: 'No rate-limit reading yet (subscription accounts only); it appears after your next message.', tUsage: 'Overview', tQuota: 'Quota', tModels: 'Models', tDaily: 'Daily',
   },
@@ -698,7 +701,7 @@ const STR = {
     models: '各模型占比（按价值）', nopr: '无价格', daily: '每日价值',
     tpsAvg: '各模型平均 TPS',
     exact: '精确值', kmb: 'K/M/B', refresh: '刷新', cmd: '展开或收起用量小窗口',
-    upd: "新版本 {v}", updHow: "更新方法：在插件目录运行 git pull，然后 /reload-plugins",
+    upd: "新版本 {v}", updHow: "更新方法：在终端运行下面的命令，然后 /reload-plugins", updShow: "更新方法",
     quota: '额度估算（API 等价价值）', w5h: '5小时', w7d: '每周', qPred: '预测{w}额度 {q}', qNeed: '（再用 {n} 后估算）', 
     qEmpty: '还没有限额读数（仅订阅账户），发一条消息后出现', tUsage: '概览', tQuota: '额度', tModels: '模型', tDaily: '每日',
   },
@@ -712,7 +715,7 @@ const STR = {
     models: '各模型占比（依價值）', nopr: '無價格', daily: '每日價值',
     tpsAvg: '各模型平均 TPS',
     exact: '精確值', kmb: 'K/M/B', refresh: '重新整理', cmd: '展開或收合用量小視窗',
-    upd: "新版本 {v}", updHow: "更新方式：在外掛目錄執行 git pull，然後 /reload-plugins",
+    upd: "新版本 {v}", updHow: "更新方式：在終端機執行下面的指令，然後 /reload-plugins", updShow: "更新方式",
     quota: '額度估算（API 等價價值）', w5h: '5小時', w7d: '每週', qPred: '預測{w}額度 {q}', qNeed: '（再用 {n} 後估算）', 
     qEmpty: '還沒有限額讀數（僅訂閱帳號），傳送一則訊息後出現', tUsage: '概覽', tQuota: '額度', tModels: '模型', tDaily: '每日',
   },
@@ -726,7 +729,7 @@ const STR = {
     models: 'モデル別の割合（金額ベース）', nopr: '価格なし', daily: '日別の金額',
     tpsAvg: 'モデル別の平均 TPS',
     exact: '正確な値', kmb: 'K/M/B', refresh: '更新', cmd: '使用量ウィンドウを開閉',
-    upd: "新バージョン {v}", updHow: "更新方法：プラグインのフォルダで git pull を実行し、/reload-plugins",
+    upd: "新バージョン {v}", updHow: "更新方法：ターミナルで次のコマンドを実行し、/reload-plugins", updShow: "更新方法",
     quota: '利用枠の推定（API 換算額）', w5h: '5時間', w7d: '週', qPred: '{w}の予測枠 {q}', qNeed: '（あと {n} で推定）', 
     qEmpty: '上限の読み取りはまだありません（サブスクリプションのみ）。次のメッセージ後に表示されます。', tUsage: '概要', tQuota: '利用枠', tModels: 'モデル', tDaily: '日別',
   },
@@ -740,7 +743,7 @@ const STR = {
     models: '모델별 비중 (가치 기준)', nopr: '가격 없음', daily: '일별 가치',
     tpsAvg: '모델별 평균 TPS',
     exact: '정확한 값', kmb: 'K/M/B', refresh: '새로고침', cmd: '사용량 창 열기/닫기',
-    upd: "새 버전 {v}", updHow: "업데이트: 플러그인 폴더에서 git pull 실행 후 /reload-plugins",
+    upd: "새 버전 {v}", updHow: "업데이트: 터미널에서 아래 명령을 실행한 뒤 /reload-plugins", updShow: "업데이트 방법",
     quota: '한도 추정 (API 환산 가치)', w5h: '5시간', w7d: '주간', qPred: '{w} 예상 한도 {q}', qNeed: '({n} 더 사용 후 추정)', 
     qEmpty: '아직 한도 정보가 없습니다(구독 계정만). 다음 메시지 후 표시됩니다.', tUsage: '개요', tQuota: '한도', tModels: '모델', tDaily: '일별',
   },
@@ -754,7 +757,7 @@ const STR = {
     models: 'Reparto por modelo (por valor)', nopr: 'sin precio', daily: 'Valor diario',
     tpsAvg: 'TPS medio por modelo',
     exact: 'Exacto', kmb: 'K/M/B', refresh: 'Actualizar', cmd: 'Mostrar u ocultar la ventana de uso',
-    upd: "Nueva versión {v}", updHow: "Para actualizar: ejecuta git pull en la carpeta del plugin y luego /reload-plugins",
+    upd: "Nueva versión {v}", updHow: "Para actualizar: ejecuta esto en una terminal y luego /reload-plugins", updShow: "Cómo actualizar",
     quota: 'Cuota estimada (valor equivalente en API)', w5h: '5 h', w7d: 'Semana', qPred: 'Cuota prevista ({w}) {q}', qNeed: '(tras {n} más)', 
     qEmpty: 'Aún no hay lectura de límites (solo cuentas de suscripción); aparece tras tu próximo mensaje.', tUsage: 'Resumen', tQuota: 'Cuota', tModels: 'Modelos', tDaily: 'Diario',
   },
@@ -768,7 +771,7 @@ const STR = {
     models: 'Anteil je Modell (nach Wert)', nopr: 'kein Preis', daily: 'Tageswert',
     tpsAvg: 'Durchschnittliche TPS je Modell',
     exact: 'Exakt', kmb: 'K/M/B', refresh: 'Aktualisieren', cmd: 'Nutzungsfenster ein- oder ausklappen',
-    upd: "Neue Version {v}", updHow: "Aktualisieren: im Plugin-Ordner git pull ausführen, dann /reload-plugins",
+    upd: "Neue Version {v}", updHow: "Aktualisieren: dies in einem Terminal ausführen, dann /reload-plugins", updShow: "So aktualisieren",
     quota: 'Kontingent geschätzt (API-Gegenwert)', w5h: '5 Std', w7d: 'Woche', qPred: 'Prognose {w}-Kontingent {q}', qNeed: '(nach weiteren {n})', 
     qEmpty: 'Noch kein Limit-Wert (nur Abo-Konten); erscheint nach der nächsten Nachricht.', tUsage: 'Übersicht', tQuota: 'Kontingent', tModels: 'Modelle', tDaily: 'Täglich',
   },
@@ -782,7 +785,7 @@ const STR = {
     models: 'Répartition par modèle (en valeur)', nopr: 'sans prix', daily: 'Valeur par jour',
     tpsAvg: 'TPS moyen par modèle',
     exact: 'Exact', kmb: 'K/M/B', refresh: 'Actualiser', cmd: "Afficher ou masquer la fenêtre d'utilisation",
-    upd: "Nouvelle version {v}", updHow: "Mise à jour : lancez git pull dans le dossier du plugin, puis /reload-plugins",
+    upd: "Nouvelle version {v}", updHow: "Mise à jour : lancez ceci dans un terminal, puis /reload-plugins", updShow: "Comment mettre à jour",
     quota: 'Quota estimé (valeur équivalente API)', w5h: '5 h', w7d: 'Semaine', qPred: 'Quota prévu ({w}) {q}', qNeed: '(après {n} de plus)', 
     qEmpty: 'Pas encore de relevé des limites (comptes abonnés seulement) ; il apparaît après le prochain message.', tUsage: 'Aperçu', tQuota: 'Quota', tModels: 'Modèles', tDaily: 'Par jour',
   },
@@ -796,7 +799,7 @@ const STR = {
     models: 'Participação por modelo (por valor)', nopr: 'sem preço', daily: 'Valor diário',
     tpsAvg: 'TPS médio por modelo',
     exact: 'Exato', kmb: 'K/M/B', refresh: 'Atualizar', cmd: 'Expandir ou recolher a janela de uso',
-    upd: "Nova versão {v}", updHow: "Para atualizar: execute git pull na pasta do plugin e depois /reload-plugins",
+    upd: "Nova versão {v}", updHow: "Para atualizar: execute isto num terminal e depois /reload-plugins", updShow: "Como atualizar",
     quota: 'Cota estimada (valor equivalente na API)', w5h: '5 h', w7d: 'Semana', qPred: 'Cota prevista ({w}) {q}', qNeed: '(após mais {n})', 
     qEmpty: 'Ainda não há leitura de limites (só contas de assinatura); aparece após a próxima mensagem.', tUsage: 'Resumo', tQuota: 'Cota', tModels: 'Modelos', tDaily: 'Diário',
   },
@@ -810,7 +813,7 @@ const STR = {
     models: 'Доля по моделям (по стоимости)', nopr: 'нет цены', daily: 'Стоимость по дням',
     tpsAvg: 'Средний TPS по моделям',
     exact: 'Точно', kmb: 'K/M/B', refresh: 'Обновить', cmd: 'Показать или скрыть окно использования',
-    upd: "Новая версия {v}", updHow: "Обновление: выполните git pull в папке плагина, затем /reload-plugins",
+    upd: "Новая версия {v}", updHow: "Обновление: выполните это в терминале, затем /reload-plugins", updShow: "Как обновить",
     quota: 'Оценка лимита (эквивалент по API)', w5h: '5 ч', w7d: 'Неделя', qPred: 'Прогноз лимита ({w}) {q}', qNeed: '(ещё {n})', 
     qEmpty: 'Данных о лимитах пока нет (только для подписки); появятся после следующего сообщения.', tUsage: 'Обзор', tQuota: 'Лимит', tModels: 'Модели', tDaily: 'По дням',
   },
@@ -953,16 +956,18 @@ export function register(on) {
   })
 
   // ---- the small window above the prompt ------------------------------------------------
-  // Hidden: the view switch alone. Brief: one status line. Full: the same strip grows into a
-  // card with the detail view. Nothing is drawn in a side pane. Everything is sized to bodyColumns.
+  // Hidden: nothing here, a small entry in the prompt footer instead (SessionMode, below). Brief:
+  // one status line. Full: the same strip grows into a card with the detail view. Nothing is
+  // drawn in a side pane. Everything is sized to bodyColumns.
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
     const els = $.ui.resolve(e)
-    const { Box, Text, Button, Select } = els
+    const { Box, Text, Button, Select, Code } = els
     const cols = e.props.bodyColumns || e.viewport?.columns || 100
     const savedView = (await $.state.get(S_VIEW)).value
     const view = VIEWS.some(([v]) => v === savedView) ? savedView : 'brief'
+    if (view === 'hidden') return next(e)
     const expanded = view === 'full'
     const editingName = (await $.state.get(S_EDITING)).value ?? false
     const tab = (await $.state.get(S_TAB)).value ?? 'usage'
@@ -1001,10 +1006,13 @@ export function register(on) {
       [...compact, ...fillShort],
       compact,
     ].map((p) => p.join(' · '))
-    const badge = latest ? strWidth('⬆ ' + tr('upd', { v: 'v' + latest })) + 2 : 0
+    const badge = latest
+      ? strWidth('⬆ ' + tr('upd', { v: 'v' + latest })) + 2 + (expanded ? 0 : strWidth(tr('updShow')) + 2)
+      : 0
     const langW = expanded ? strWidth(cfg.lang === 'auto' ? 'Auto · ' + LANG_NAMES[autoLang] : LANG_NAMES[cfg.lang] || '') + 8 : 0
     // The view switch: its labels and the gaps between them and before it.
-    const switchW = VIEWS.reduce((w, [, label]) => w + strWidth(tr(label)) + 2, 0) + 2
+    // The current view is drawn in brackets, 2 cells more.
+    const switchW = VIEWS.reduce((w, [, label]) => w + strWidth(tr(label)) + 2, 0) + 4
     const room = cols - switchW - badge - langW
     const status = variants.find((v) => strWidth(v) <= room) || variants[variants.length - 1]
 
@@ -1013,8 +1021,12 @@ export function register(on) {
       flexDirection: 'row',
       columnGap: 2,
       children: [
-        ...(view === 'hidden' ? [] : [Text({ dimColor: true, wrap: 'truncate-end', children: [status] })]),
+        Text({ dimColor: true, wrap: 'truncate-end', children: [status] }),
         ...(latest ? [Text({ color: 'yellow', children: ['⬆ ' + tr('upd', { v: 'v' + latest })] })] : []),
+        // Opens the card, where the update command is.
+        ...(latest && !expanded
+          ? [Button({ key: 'upd', label: tr('updShow'), plain: true, onPress: () => setView($, 'full') })]
+          : []),
       ],
     })
 
@@ -1039,9 +1051,15 @@ export function register(on) {
               }),
             ]
           : []),
-        // The current view is drawn at full strength, the other two dim.
+        // The current view is drawn at full strength and in brackets, the other two dim.
         ...VIEWS.map(([v, label]) =>
-          Button({ key: 'view-' + v, label: tr(label), plain: true, dimColor: view !== v, onPress: () => setView($, v) }),
+          Button({
+            key: 'view-' + v,
+            label: view === v ? '[' + tr(label) + ']' : tr(label),
+            plain: true,
+            dimColor: view !== v,
+            onPress: () => setView($, v),
+          }),
         ),
       ],
     })
@@ -1054,11 +1072,28 @@ export function register(on) {
     })
 
     const children = [line]
-    if (expanded && latest) children.push(Text({ color: 'yellow', children: [tr('updHow')] }))
+    if (expanded && latest) {
+      // Shown, never run: the person copies it into their own terminal.
+      children.push(Text({ color: 'yellow', children: [tr('updHow')] }))
+      children.push(Code({ source: updateCommand($), language: 'sh' }))
+    }
     if (expanded) children.push(detailView($, els, now, cols, editingName, tab))
     const rest = await next(e)
     if (rest) children.push(rest)
     return children.length === 1 ? line : Box({ flexDirection: 'column', children })
+  })
+
+  // The hidden view's entry, at the left of the prompt footer's mode labels: speed, session
+  // value and the update mark; a press brings the status line back.
+  on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
+    const savedView = (await $.state.get(S_VIEW)).value
+    if (savedView !== 'hidden') return next(e)
+    const { Box, Button } = $.ui.resolve(e)
+    const tps = (await $.state.get(S_TPS)).value ?? null
+    const label = '⚡' + (tps ? tps.value.toFixed(0) : '—') + ' · ' + usdOf(sessionTotals()) + (latest ? ' ⬆' : '')
+    const entry = Button({ key: 'meter-show', label, plain: true, dimColor: true, onPress: () => setView($, 'brief') })
+    const rest = await next(e)
+    return rest ? Box({ flexDirection: 'row', columnGap: 2, children: [entry, rest] }) : entry
   })
 }
 
