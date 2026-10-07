@@ -95,7 +95,7 @@ let lastFullRefresh = 0
 
 // UI state lives in $.state so a hot reload keeps it (module variables start over).
 // Declared in types/index.d.ts. A read while drawing subscribes the drawing to the value.
-const S_EXPANDED = { plugin: 'muxue-meter', key: 'expanded' }
+const S_VIEW = { plugin: 'muxue-meter', key: 'view' }
 const S_EDITING = { plugin: 'muxue-meter', key: 'editingName' }
 const S_TPS = { plugin: 'muxue-meter', key: 'tps' }
 const S_TAB = { plugin: 'muxue-meter', key: 'tab' }
@@ -675,7 +675,7 @@ const LANG_ORDER = Object.keys(LANG_NAMES)
 
 const STR = {
   en: {
-    session: 'Session', today: 'Today', hit: 'Cache hit', more: 'Details', less: 'Close',
+    session: 'Session', today: 'Today', hit: 'Cache hit', vHide: 'Hide', vBrief: 'Brief', vFull: 'Detailed',
     d1: '1d', d7: '7d', d30: '30d', acct: 'Account', all: 'All', cur: 'current', acctN: 'Account {id}',
     edit: 'Rename', rnPh: 'Type a name, press Enter', save: 'Save',
     nodata: 'No data for the last {n} days yet. It starts counting after your next message.',
@@ -689,7 +689,7 @@ const STR = {
     qEmpty: 'No rate-limit reading yet (subscription accounts only); it appears after your next message.', tUsage: 'Overview', tQuota: 'Quota', tModels: 'Models', tDaily: 'Daily',
   },
   'zh-CN': {
-    session: '当前会话', today: '今日', hit: '缓存命中', more: '详情', less: '收起',
+    session: '当前会话', today: '今日', hit: '缓存命中', vHide: '收起', vBrief: '简略', vFull: '详细',
     d1: '1天', d7: '7天', d30: '30天', acct: '账户', all: '全部', cur: '当前', acctN: '账户 {id}',
     edit: '改名', rnPh: '输入名称后回车', save: '保存',
     nodata: '最近 {n} 天还没有数据，发一条消息后开始统计',
@@ -703,7 +703,7 @@ const STR = {
     qEmpty: '还没有限额读数（仅订阅账户），发一条消息后出现', tUsage: '概览', tQuota: '额度', tModels: '模型', tDaily: '每日',
   },
   'zh-TW': {
-    session: '目前工作階段', today: '今日', hit: '快取命中', more: '詳情', less: '收合',
+    session: '目前工作階段', today: '今日', hit: '快取命中', vHide: '收合', vBrief: '簡略', vFull: '詳細',
     d1: '1天', d7: '7天', d30: '30天', acct: '帳號', all: '全部', cur: '目前', acctN: '帳號 {id}',
     edit: '改名', rnPh: '輸入名稱後按 Enter', save: '儲存',
     nodata: '最近 {n} 天還沒有資料，傳送一則訊息後開始統計',
@@ -717,7 +717,7 @@ const STR = {
     qEmpty: '還沒有限額讀數（僅訂閱帳號），傳送一則訊息後出現', tUsage: '概覽', tQuota: '額度', tModels: '模型', tDaily: '每日',
   },
   ja: {
-    session: 'セッション', today: '今日', hit: 'キャッシュ命中', more: '詳細', less: '閉じる',
+    session: 'セッション', today: '今日', hit: 'キャッシュ命中', vHide: '隠す', vBrief: '簡易', vFull: '詳細',
     d1: '1日', d7: '7日', d30: '30日', acct: 'アカウント', all: 'すべて', cur: '現在', acctN: 'アカウント {id}',
     edit: '名前変更', rnPh: '名前を入力して Enter', save: '保存',
     nodata: '直近 {n} 日のデータはまだありません。次のメッセージから集計します。',
@@ -731,7 +731,7 @@ const STR = {
     qEmpty: '上限の読み取りはまだありません（サブスクリプションのみ）。次のメッセージ後に表示されます。', tUsage: '概要', tQuota: '利用枠', tModels: 'モデル', tDaily: '日別',
   },
   ko: {
-    session: '현재 세션', today: '오늘', hit: '캐시 적중', more: '자세히', less: '닫기',
+    session: '현재 세션', today: '오늘', hit: '캐시 적중', vHide: '숨기기', vBrief: '간략', vFull: '자세히',
     d1: '1일', d7: '7일', d30: '30일', acct: '계정', all: '전체', cur: '현재', acctN: '계정 {id}',
     edit: '이름 변경', rnPh: '이름 입력 후 Enter', save: '저장',
     nodata: '최근 {n}일 데이터가 아직 없습니다. 다음 메시지부터 집계합니다.',
@@ -745,7 +745,7 @@ const STR = {
     qEmpty: '아직 한도 정보가 없습니다(구독 계정만). 다음 메시지 후 표시됩니다.', tUsage: '개요', tQuota: '한도', tModels: '모델', tDaily: '일별',
   },
   es: {
-    session: 'Sesión', today: 'Hoy', hit: 'Acierto de caché', more: 'Detalles', less: 'Cerrar',
+    session: 'Sesión', today: 'Hoy', hit: 'Acierto de caché', vHide: 'Ocultar', vBrief: 'Breve', vFull: 'Detalles',
     d1: '1 d', d7: '7 d', d30: '30 d', acct: 'Cuenta', all: 'Todas', cur: 'actual', acctN: 'Cuenta {id}',
     edit: 'Renombrar', rnPh: 'Escribe un nombre y pulsa Enter', save: 'Guardar',
     nodata: 'Aún no hay datos de los últimos {n} días. Empieza a contar con tu próximo mensaje.',
@@ -759,7 +759,7 @@ const STR = {
     qEmpty: 'Aún no hay lectura de límites (solo cuentas de suscripción); aparece tras tu próximo mensaje.', tUsage: 'Resumen', tQuota: 'Cuota', tModels: 'Modelos', tDaily: 'Diario',
   },
   de: {
-    session: 'Sitzung', today: 'Heute', hit: 'Cache-Treffer', more: 'Details', less: 'Schließen',
+    session: 'Sitzung', today: 'Heute', hit: 'Cache-Treffer', vHide: 'Ausblenden', vBrief: 'Kurz', vFull: 'Details',
     d1: '1 T', d7: '7 T', d30: '30 T', acct: 'Konto', all: 'Alle', cur: 'aktuell', acctN: 'Konto {id}',
     edit: 'Umbenennen', rnPh: 'Namen eingeben, Enter drücken', save: 'Speichern',
     nodata: 'Noch keine Daten für die letzten {n} Tage. Die Zählung beginnt mit der nächsten Nachricht.',
@@ -773,7 +773,7 @@ const STR = {
     qEmpty: 'Noch kein Limit-Wert (nur Abo-Konten); erscheint nach der nächsten Nachricht.', tUsage: 'Übersicht', tQuota: 'Kontingent', tModels: 'Modelle', tDaily: 'Täglich',
   },
   fr: {
-    session: 'Session', today: "Aujourd'hui", hit: 'Succès du cache', more: 'Détails', less: 'Fermer',
+    session: 'Session', today: "Aujourd'hui", hit: 'Succès du cache', vHide: 'Masquer', vBrief: 'Bref', vFull: 'Détails',
     d1: '1 j', d7: '7 j', d30: '30 j', acct: 'Compte', all: 'Tous', cur: 'actuel', acctN: 'Compte {id}',
     edit: 'Renommer', rnPh: 'Saisissez un nom, puis Entrée', save: 'Enregistrer',
     nodata: "Pas encore de données sur les {n} derniers jours. Le suivi commence au prochain message.",
@@ -787,7 +787,7 @@ const STR = {
     qEmpty: 'Pas encore de relevé des limites (comptes abonnés seulement) ; il apparaît après le prochain message.', tUsage: 'Aperçu', tQuota: 'Quota', tModels: 'Modèles', tDaily: 'Par jour',
   },
   pt: {
-    session: 'Sessão', today: 'Hoje', hit: 'Acerto de cache', more: 'Detalhes', less: 'Fechar',
+    session: 'Sessão', today: 'Hoje', hit: 'Acerto de cache', vHide: 'Ocultar', vBrief: 'Breve', vFull: 'Detalhes',
     d1: '1 d', d7: '7 d', d30: '30 d', acct: 'Conta', all: 'Todas', cur: 'atual', acctN: 'Conta {id}',
     edit: 'Renomear', rnPh: 'Digite um nome e pressione Enter', save: 'Salvar',
     nodata: 'Ainda não há dados dos últimos {n} dias. A contagem começa na próxima mensagem.',
@@ -801,7 +801,7 @@ const STR = {
     qEmpty: 'Ainda não há leitura de limites (só contas de assinatura); aparece após a próxima mensagem.', tUsage: 'Resumo', tQuota: 'Cota', tModels: 'Modelos', tDaily: 'Diário',
   },
   ru: {
-    session: 'Сессия', today: 'Сегодня', hit: 'Попадания в кэш', more: 'Подробнее', less: 'Закрыть',
+    session: 'Сессия', today: 'Сегодня', hit: 'Попадания в кэш', vHide: 'Скрыть', vBrief: 'Кратко', vFull: 'Подробно',
     d1: '1 д', d7: '7 д', d30: '30 д', acct: 'Аккаунт', all: 'Все', cur: 'текущий', acctN: 'Аккаунт {id}',
     edit: 'Переименовать', rnPh: 'Введите имя и нажмите Enter', save: 'Сохранить',
     nodata: 'Данных за последние {n} дн. пока нет. Подсчёт начнётся со следующего сообщения.',
@@ -840,10 +840,19 @@ async function detectLang($) {
 const acctName = (a) => cfg.names[a] || (cfg.hints || {})[a] || tr('acctN', { id: a.slice(0, 4) })
 const acctLabel = (a) => acctName(a) + (a === shownAcct() ? ' (' + tr('cur') + ')' : '')
 
-const toggleExpanded = async ($) => {
-  await $.state.set(S_EXPANDED, !((await $.state.get(S_EXPANDED)).value ?? false))
+// The band's three views: 'hidden' (the view switch alone), 'brief' (the status line) and
+// 'full' (the status line and the detail card).
+const VIEWS = [
+  ['hidden', 'vHide'],
+  ['brief', 'vBrief'],
+  ['full', 'vFull'],
+]
+const setView = async ($, view) => {
+  await $.state.set(S_VIEW, view)
   await $.state.set(S_EDITING, false)
 }
+// /meter: open the card, or back to the status line when it is open.
+const toggleView = async ($) => setView($, ((await $.state.get(S_VIEW)).value ?? 'brief') === 'full' ? 'brief' : 'full')
 
 // ---- module -----------------------------------------------------------------------------
 
@@ -880,7 +889,7 @@ export function register(on) {
   })
 
   on('command.run', { command: 'meter' }, async ($) => {
-    await toggleExpanded($)
+    await toggleView($)
     return {}
   })
 
@@ -944,15 +953,17 @@ export function register(on) {
   })
 
   // ---- the small window above the prompt ------------------------------------------------
-  // Collapsed: one line that is always visible. Expanded: the same strip grows into a card
-  // with the detail view. Nothing is drawn in a side pane. Everything is sized to bodyColumns.
+  // Hidden: the view switch alone. Brief: one status line. Full: the same strip grows into a
+  // card with the detail view. Nothing is drawn in a side pane. Everything is sized to bodyColumns.
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
     const els = $.ui.resolve(e)
     const { Box, Text, Button, Select } = els
     const cols = e.props.bodyColumns || e.viewport?.columns || 100
-    const expanded = (await $.state.get(S_EXPANDED)).value ?? false
+    const savedView = (await $.state.get(S_VIEW)).value
+    const view = VIEWS.some(([v]) => v === savedView) ? savedView : 'brief'
+    const expanded = view === 'full'
     const editingName = (await $.state.get(S_EDITING)).value ?? false
     const tab = (await $.state.get(S_TAB)).value ?? 'usage'
     const tps = (await $.state.get(S_TPS)).value ?? null
@@ -963,7 +974,6 @@ export function register(on) {
     const day = dayAgg.tot
     const hit = cacheHit(s)
     const multi = dayAgg.accts.length > 1
-    const toggleLabel = expanded ? tr('less') : tr('more')
 
     // The status text at three widths; the widest that fits beside the toggle is shown.
     const hitText = hit === null ? '—' : fmtPct(hit)
@@ -993,7 +1003,9 @@ export function register(on) {
     ].map((p) => p.join(' · '))
     const badge = latest ? strWidth('⬆ ' + tr('upd', { v: 'v' + latest })) + 2 : 0
     const langW = expanded ? strWidth(cfg.lang === 'auto' ? 'Auto · ' + LANG_NAMES[autoLang] : LANG_NAMES[cfg.lang] || '') + 8 : 0
-    const room = cols - strWidth(toggleLabel) - 4 - badge - langW
+    // The view switch: its labels and the gaps between them and before it.
+    const switchW = VIEWS.reduce((w, [, label]) => w + strWidth(tr(label)) + 2, 0) + 2
+    const room = cols - switchW - badge - langW
     const status = variants.find((v) => strWidth(v) <= room) || variants[variants.length - 1]
 
     const left = Box({
@@ -1001,12 +1013,12 @@ export function register(on) {
       flexDirection: 'row',
       columnGap: 2,
       children: [
-        Text({ dimColor: true, wrap: 'truncate-end', children: [status] }),
+        ...(view === 'hidden' ? [] : [Text({ dimColor: true, wrap: 'truncate-end', children: [status] })]),
         ...(latest ? [Text({ color: 'yellow', children: ['⬆ ' + tr('upd', { v: 'v' + latest })] })] : []),
       ],
     })
 
-    // At the right end of the top line: the language picker while the card is open, then the toggle.
+    // At the right end of the top line: the language picker while the card is open, then the view switch.
     const langOptions = [
       { value: 'auto', label: 'Auto · ' + LANG_NAMES[autoLang] },
       ...LANG_ORDER.map((code) => ({ value: code, label: LANG_NAMES[code] })),
@@ -1027,7 +1039,10 @@ export function register(on) {
               }),
             ]
           : []),
-        Button({ key: 'toggle-usage', label: toggleLabel, plain: true, onPress: () => toggleExpanded($) }),
+        // The current view is drawn at full strength, the other two dim.
+        ...VIEWS.map(([v, label]) =>
+          Button({ key: 'view-' + v, label: tr(label), plain: true, dimColor: view !== v, onPress: () => setView($, v) }),
+        ),
       ],
     })
     const line = Box({
