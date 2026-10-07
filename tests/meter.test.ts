@@ -65,10 +65,10 @@ test('desktop session: account from CLAUDE_CODE_ACCOUNT_UUID, labelled by masked
   await start($, 'desktop')
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
-    await ui.press({ key: 'toggle-usage' })
+    await ui.press({ key: 'view-full' })
     const acct = await ui.find({ key: 'acct' })
     expect(acct?.props.options).toContainEqual({ value: id, label: expect.stringContaining('al…@example.com') })
-    await ui.press({ key: 'toggle-usage' })
+    await ui.press({ key: 'view-brief' })
     await ui.unmount()
   }
 })
@@ -82,10 +82,10 @@ test('macOS / Linux CLI session: no USERPROFILE, account read from $HOME/.claude
   await start($, 'terminal')
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
-    await ui.press({ key: 'toggle-usage' })
+    await ui.press({ key: 'view-full' })
     const acct = await ui.find({ key: 'acct' })
     expect(acct?.props.options).toContainEqual({ value: id, label: expect.stringContaining('bo…@example.org') })
-    await ui.press({ key: 'toggle-usage' })
+    await ui.press({ key: 'view-brief' })
     await ui.unmount()
   }
 })
@@ -120,6 +120,29 @@ test('narrow band: the status line drops to its compact form', async ($, on) => 
   }
 })
 
+test('view switch: hidden shows only the switch, brief the status line, full the card', async ($, on) => {
+  world(on, { env: { HOME: '/Users/mac' }, store: { cfg: { names: {}, hints: {}, range: '7', acct: 'all', exact: false, lang: 'en' } } })
+  await start($, 'desktop')
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
+    for (const key of ['view-hidden', 'view-brief', 'view-full']) expect(await ui.find({ key })).toBeDefined()
+    // Brief by default: the status line, no card.
+    expect(await ui.find({ type: 'Text', text: /Session \$/ })).toBeDefined()
+    expect(await ui.find({ key: 'acct' })).toBeUndefined()
+    await ui.press({ key: 'view-hidden' })
+    expect(await ui.find({ type: 'Text', text: /Session \$/ })).toBeUndefined()
+    expect(await ui.find({ key: 'view-brief' })).toBeDefined()
+    await ui.press({ key: 'view-full' })
+    expect(await ui.find({ type: 'Text', text: /Session \$/ })).toBeDefined()
+    expect(await ui.find({ key: 'acct' })).toBeDefined()
+    // /meter from the card goes back to the status line.
+    await $.command.run({ command: 'meter', args: '' } as any)
+    expect(await ui.find({ key: 'acct' })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /Session \$/ })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
 test('a rename keeps names another session saved meanwhile', async ($, on) => {
   const other = await hash('uuid-other')
   world(on, {
@@ -132,7 +155,7 @@ test('a rename keeps names another session saved meanwhile', async ($, on) => {
   const id = await hash('uuid-desktop')
   await start($, 'desktop')
   const ui = await $.ui.mount({ plugin: 'muxue-meter', surface: 'desktop', ...band() })
-  await ui.press({ key: 'toggle-usage' })
+  await ui.press({ key: 'view-full' })
   await ui.select({ key: 'acct', value: id })
   await ui.press({ key: 'edit-name' })
   await ui.input({ key: 'rename', text: 'home' })
@@ -180,17 +203,17 @@ test('quota: value recorded since the first reading divided by the rise of the f
   ])
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
-    await ui.press({ key: 'toggle-usage' })
+    await ui.press({ key: 'view-full' })
     await ui.press({ key: 'tab-quota' })
     expect(await ui.find({ type: 'Text', text: /^Predicted 5h quota \$50\.00$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^Predicted Week quota — \(after 3% more\)$/ })).toBeDefined()
     // Another tab: the quota rows give way, and the collapsed line still carries the fill.
     await ui.press({ key: 'tab-usage' })
     expect(await ui.find({ type: 'Text', text: /Predicted/ })).toBeUndefined()
-    await ui.press({ key: 'toggle-usage' })
+    await ui.press({ key: 'view-brief' })
     expect(await ui.find({ type: 'Text', text: /· 5h 20% · Week 2%$/ })).toBeDefined()
-    await ui.press({ key: 'toggle-usage' })
-    await ui.press({ key: 'toggle-usage' })
+    await ui.press({ key: 'view-full' })
+    await ui.press({ key: 'view-brief' })
     await ui.unmount()
   }
 })
@@ -216,20 +239,20 @@ test('quota: recording that started mid-window divides only what came after the 
   await measure($, [{ kind: 'five_hour', percentUsed: 92, resetsAt: iso(NOW + 3 * H) }])
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
-    await ui.press({ key: 'toggle-usage' })
+    await ui.press({ key: 'view-full' })
     await ui.press({ key: 'tab-quota' })
     expect(await ui.find({ type: 'Text', text: /^Predicted 5h quota — \(after 1% more\)$/ })).toBeDefined()
-    await ui.press({ key: 'toggle-usage' })
+    await ui.press({ key: 'view-brief' })
     await ui.unmount()
   }
   // 10 points since the first reading: $5 / 10% = $50.
   await measure($, [{ kind: 'five_hour', percentUsed: 98, resetsAt: iso(NOW + 3 * H + 3000) }])
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
-    await ui.press({ key: 'toggle-usage' })
+    await ui.press({ key: 'view-full' })
     await ui.press({ key: 'tab-quota' })
     expect(await ui.find({ type: 'Text', text: /^Predicted 5h quota \$50\.00$/ })).toBeDefined()
-    await ui.press({ key: 'toggle-usage' })
+    await ui.press({ key: 'view-brief' })
     await ui.unmount()
   }
 })
@@ -243,7 +266,7 @@ test('quota: an estimate saved by 0.5.0 drafts (a part divided by the whole fill
   await start($, 'desktop')
   await measure($, [{ kind: 'seven_day', percentUsed: 92, resetsAt: iso(NOW + 6 * H) }])
   const ui = await $.ui.mount({ plugin: 'muxue-meter', surface: 'desktop', ...band() })
-  await ui.press({ key: 'toggle-usage' })
+  await ui.press({ key: 'view-full' })
   await ui.press({ key: 'tab-quota' })
   expect(await ui.find({ type: 'Text', text: /^Predicted Week quota — \(after 5% more\)$/ })).toBeDefined()
   await ui.unmount()
@@ -254,14 +277,14 @@ test('tabs are labelled in the chosen language; the toggle and language picker s
   await start($, 'desktop')
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
-    await ui.press({ key: 'toggle-usage' })
+    await ui.press({ key: 'view-full' })
     for (const [key, label] of [['tab-usage', '概览'], ['tab-quota', '额度'], ['tab-models', '模型'], ['tab-daily', '每日']]) {
       expect((await ui.find({ key }))?.props.label).toContain(label)
     }
     const right = await ui.find({ key: 'usage-right' })
     expect(right).toBeDefined()
     expect(await ui.find({ key: 'lang' })).toBeDefined()
-    await ui.press({ key: 'toggle-usage' })
+    await ui.press({ key: 'view-brief' })
     expect(await ui.find({ key: 'lang' })).toBeUndefined()
     await ui.unmount()
   }
@@ -288,7 +311,7 @@ test('quota: each account keeps its own readings; selecting one hides the others
   await measure($, [{ kind: 'five_hour', percentUsed: 10, resetsAt: iso(NOW + 4 * H) }])
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
-    await ui.press({ key: 'toggle-usage' })
+    await ui.press({ key: 'view-full' })
     await ui.press({ key: 'tab-quota' })
     expect(await ui.find({ type: 'Text', text: /^Predicted 5h quota \$50\.00$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^Predicted 5h quota — \(after 5% more\)$/ })).toBeDefined()
@@ -296,7 +319,7 @@ test('quota: each account keeps its own readings; selecting one hides the others
     await ui.select({ key: 'acct', value: id })
     expect(await ui.find({ type: 'Text', text: /\$50\.00/ })).toBeUndefined()
     await ui.select({ key: 'acct', value: 'all' })
-    await ui.press({ key: 'toggle-usage' })
+    await ui.press({ key: 'view-brief' })
     await ui.unmount()
   }
 })
@@ -313,10 +336,10 @@ test('quota: a resumed session keeps its own saved estimate', async ($, on) => {
   await start($, 'desktop')
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
-    await ui.press({ key: 'toggle-usage' })
+    await ui.press({ key: 'view-full' })
     await ui.press({ key: 'tab-quota' })
     expect(await ui.find({ type: 'Text', text: /^Predicted 5h quota \$42\.00$/ })).toBeDefined()
-    await ui.press({ key: 'toggle-usage' })
+    await ui.press({ key: 'view-brief' })
     await ui.unmount()
   }
 })
@@ -344,11 +367,11 @@ test("quota: a new window starts over from its own first reading", async ($, on)
   await measure($, [{ kind: 'five_hour', percentUsed: 6, resetsAt: iso(NOW + 4.5 * H) }])
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
-    await ui.press({ key: 'toggle-usage' })
+    await ui.press({ key: 'view-full' })
     await ui.press({ key: 'tab-quota' })
     // $6 in the new window over its 6%; the old window's $70 and its baseline play no part.
     expect(await ui.find({ type: 'Text', text: /^Predicted 5h quota \$100$/ })).toBeDefined()
-    await ui.press({ key: 'toggle-usage' })
+    await ui.press({ key: 'view-brief' })
     await ui.unmount()
   }
 })
@@ -392,7 +415,7 @@ test('quota: a CLI session whose ~/.claude.json names another account is filed u
   ])
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
-    await ui.press({ key: 'toggle-usage' })
+    await ui.press({ key: 'view-full' })
     const acct = await ui.find({ key: 'acct' })
     expect(acct?.props.options).toContainEqual({ value: real, label: 'real (current)' })
     await ui.press({ key: 'tab-quota' })
@@ -402,7 +425,7 @@ test('quota: a CLI session whose ~/.claude.json names another account is filed u
     await ui.select({ key: 'acct', value: named })
     expect(await ui.find({ type: 'Text', text: /\$50\.00/ })).toBeUndefined()
     await ui.select({ key: 'acct', value: 'all' })
-    await ui.press({ key: 'toggle-usage' })
+    await ui.press({ key: 'view-brief' })
     await ui.unmount()
   }
 })
@@ -419,7 +442,7 @@ test('a session whose own saved doc is unreadable still counts the other session
   })
   await start($, 'desktop')
   const ui = await $.ui.mount({ plugin: 'muxue-meter', surface: 'desktop', ...band() })
-  await ui.press({ key: 'toggle-usage' })
+  await ui.press({ key: 'view-full' })
   expect(await ui.find({ type: 'Text', text: /API-equivalent value \$10\.00/ })).toBeDefined()
   await ui.unmount()
 })
@@ -433,9 +456,9 @@ test('expanded at desktop width: the status line keeps labels instead of the com
   ])
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band(100) })
-    await ui.press({ key: 'toggle-usage' })
+    await ui.press({ key: 'view-full' })
     expect(await ui.find({ type: 'Text', text: /当前会话 \$0\.00 · 今日 \$0\.00 .*5小时 14% · 每周 92%$/ })).toBeDefined()
-    await ui.press({ key: 'toggle-usage' })
+    await ui.press({ key: 'view-brief' })
     await ui.unmount()
   }
 })
@@ -458,7 +481,7 @@ test('an impossible speed (a timing glitch) is neither shown nor recorded', asyn
   await stream.result
   const ui = await $.ui.mount({ plugin: 'muxue-meter', surface: 'desktop', ...band() })
   expect(await ui.find({ type: 'Text', text: /^⚡ — tok\/s · Session \$0\.0\d/ })).toBeDefined()
-  await ui.press({ key: 'toggle-usage' })
+  await ui.press({ key: 'view-full' })
   await ui.press({ key: 'tab-models' })
   expect(await ui.find({ type: 'Text', text: /t\/s$/ })).toBeUndefined()
   await ui.unmount()

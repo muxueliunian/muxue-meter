@@ -5,10 +5,11 @@
 A Claude Code mod: one line of usage stats above the prompt, plus a details panel.
 
 ```
-⚡ opus-5-5 97.7 tok/s · Session $2.29 · Today $2.10 · Cache hit 97.65%   Details
+⚡ opus-5-5 97.7 tok/s · Session $2.29 · Today $2.10 · Cache hit 97.65%   Hide  Brief  Detailed
 ```
 
-- Details panel (click "Details" or type `/meter`; it opens above the prompt, not in the sidebar): 1 / 7 / 30 days, filter by account, share by model, average TPS, daily value; tokens shown as K / M / B or exact values
+- The "Hide / Brief / Detailed" switch at the right picks the view: Hide keeps only the switch, Brief the one-line status bar, Detailed adds the details card below it
+- Details panel (click "Detailed" or type `/meter`; it opens above the prompt, not in the sidebar): 1 / 7 / 30 days, filter by account, share by model, average TPS, daily value; tokens shown as K / M / B or exact values
 - Quota estimate (in the details card): works back from how full the 5-hour and weekly limits are to how big they are, `quota ≈ API-equivalent value recorded since the window's first reading ÷ the points the fill rose since` (a figure appears once the rise is 5 points), shown as "Predicted 5h quota" and "Predicted Week quota"; worked out per account, one group per account. Until then the last estimate is shown. A CLI session whose `~/.claude.json` names another account than the one it really uses is told apart by its weekly reset time and counted under the right account
 - The status line and the details card adapt to the available width: everything when there is room, shorter forms when it gets narrow
 - The UI comes in 10 languages; it follows the system language by default and can be switched from the top right of the details card
