@@ -528,3 +528,40 @@ test("a subagent's requests count toward the session, and several at once keep t
   expect(await ui.find({ type: 'Text', text: /Session \$3\.00/ })).toBeDefined()
   await ui.unmount()
 })
+
+test('Haiku 5.5 is priced by prompt length, and Sonnet 5.5 cache reads at $0.10', async ($, on) => {
+  const clock = world(on, { env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' }, store: { cfg: enCfg } })
+  const usages: Record<string, any> = {
+    // 1M output at $0.50: a short prompt.
+    a: { model: 'claude-haiku-5-5', input_tokens: 0, output_tokens: 1e6, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+    // 150k prompt (over 100k, counting the cache read): 50k input at $0.50 + 100k cache read at $0.05 + 1M output at $2.50.
+    b: { model: 'claude-haiku-5-5', input_tokens: 50000, output_tokens: 1e6, cache_read_input_tokens: 100000, cache_creation_input_tokens: 0 },
+    // 10M cache read at $0.10.
+    c: { model: 'claude-sonnet-5-5', input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 1e7, cache_creation_input_tokens: 0 },
+  }
+  on('turn.step', async function* ($: any, e: any, next: any) {
+    const usage = usages[e.turnId]
+    yield { kind: 'text', index: 0, text: 'x' }
+    await clock.advance(1000)
+    yield { kind: 'stop', stopReason: 'end_turn', usage }
+    return { turnId: e.turnId, index: 0, answer: 'x', toolUses: [], stopReason: 'end_turn', usage }
+  } as any)
+  await start($, 'desktop')
+  for (const turnId of Object.keys(usages)) {
+    const stream: any = $.turn.step({ turnId, index: 0, model: usages[turnId].model, messageCount: 1 } as any)
+    for await (const _ of stream) {
+    }
+    await stream.result
+  }
+  // 0.50 + (0.025 + 0.005 + 2.50) + 1.00
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
+    expect(await ui.find({ type: 'Text', text: /Session \$4\.03/ })).toBeDefined()
+    await ui.press({ key: 'view-full' })
+    await ui.press({ key: 'tab-models' })
+    expect(await ui.find({ type: 'Text', text: /haiku-5-5@long/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /no price/ })).toBeUndefined()
+    await ui.press({ key: 'view-brief' })
+    await ui.unmount()
+  }
+})

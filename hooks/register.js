@@ -36,8 +36,10 @@ const PRICES = [
   [/opus-5-5/, 4, 20, 5, 0.2],
   [/opus-5(?!\d)|opus-4-[5-8]/, 5, 25, 6.25, 0.5],
   [/opus-4-[01]|opus-4(?!-)/, 15, 75, 18.75, 1.5],
+  [/sonnet-5-5/, 2, 10, 2.5, 0.1],
   [/sonnet-5/, 2, 10, 2.5, 0.2],
   [/sonnet-4/, 3, 15, 3.75, 0.3],
+  [/haiku-5-5/, 0.1, 0.5, 0.125, 0.01],
   [/haiku-4-5/, 1, 5, 1.25, 0.1],
   [/haiku-3-5/, 0.8, 4, 1, 0.08],
 ]
@@ -46,12 +48,26 @@ const PRICES = [
 // FAST matches; elsewhere its price is unknown and the row shows as unpriced.
 const FAST = /opus-5/
 const FAST_X = 2
+// Models priced by prompt length: a request whose prompt (input + cache read + cache write) is over
+// the threshold is recorded as "<model>@long" and costs the second set of prices.
+const LONG = [[/haiku-5-5/, 100000, 0.5, 2.5, 0.625, 0.05]]
 const priceOf = (model) => {
-  const [base, speed] = model.split('@')
+  const [base, tier] = model.split('@')
   const p = PRICES.find((q) => q[0].test(base))
-  if (!p || !speed) return p
-  if (speed !== 'fast' || !FAST.test(base)) return undefined
+  if (!p || !tier) return p
+  if (tier === 'long') {
+    const l = LONG.find((q) => q[0].test(base))
+    return l && [l[0], ...l.slice(2)]
+  }
+  if (tier !== 'fast' || !FAST.test(base)) return undefined
   return [p[0], ...p.slice(1).map((v) => v * FAST_X)]
+}
+const modelKey = (model, usage) => {
+  if (usage.speed === 'fast') return model + '@fast'
+  const prompt =
+    (usage.input_tokens || 0) + (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0)
+  const l = LONG.find((q) => q[0].test(model))
+  return l && prompt > l[1] ? model + '@long' : model
 }
 const rowUsd = (model, r) => {
   const p = priceOf(model)
@@ -941,7 +957,7 @@ export function register(on) {
       const usage = stopUsage || result.usage
       if (usage) {
         const gen = first && stopAt ? { ms: stopAt - first } : null
-        const model = (usage.model || e.model) + (usage.speed === 'fast' ? '@fast' : '')
+        const model = modelKey(usage.model || e.model, usage)
         await record($, model, usage, gen)
       }
     } catch {}
