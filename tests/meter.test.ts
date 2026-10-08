@@ -391,6 +391,66 @@ test("quota: a new window starts over from its own first reading", async ($, on)
   }
 })
 
+test('quota: a window reset early (its fill fell, resetsAt kept) starts over from the fall', async ($, on) => {
+  const id = await hash('uuid-desktop')
+  world(on, {
+    env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' },
+    store: {
+      cfg: enCfg,
+      // The week was first read at 0% three days ago and filled to 96% ($300); a reset card then
+      // emptied it without moving resetsAt, and another session read it at 0% two hours ago.
+      's:before': {
+        upd: NOW,
+        days: {},
+        base: { [id]: { seven_day: { p: 0, r: NOW + 48 * H, at: NOW - 72 * H } } },
+        rl: { [id]: { seven_day: { p: 96, r: NOW + 48 * H, at: NOW - 3 * H } } },
+        b: { [bucket(NOW - 24 * H)]: { [id]: { u: 300 } } },
+      },
+      's:after': {
+        upd: NOW,
+        days: {},
+        base: { [id]: { seven_day: { p: 0, r: NOW + 48 * H + 3000, at: NOW - 2 * H } } },
+        b: { [bucket(NOW - H)]: { [id]: { u: 25 } } },
+      },
+    },
+  })
+  await start($, 'desktop')
+  await measure($, [{ kind: 'seven_day', percentUsed: 10, resetsAt: iso(NOW + 48 * H) }])
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
+    await ui.press({ key: 'view-full' })
+    await ui.press({ key: 'tab-quota' })
+    // $25 since the reset over 10%; the $300 from before it is not divided by the new fill.
+    expect(await ui.find({ type: 'Text', text: /^Predicted Week quota \$250$/ })).toBeDefined()
+    await ui.press({ key: 'view-brief' })
+    await ui.unmount()
+  }
+})
+
+test('quota: a session open across an early reset starts over from its first reading after it', async ($, on) => {
+  const id = await hash('uuid-desktop')
+  const clock = world(on, {
+    env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' },
+    store: { cfg: enCfg, 's:other': { upd: NOW, days: {}, b: { [bucket(NOW - H)]: { [id]: { u: 200 } }, [bucket(NOW + H)]: { [id]: { u: 20 } } } } },
+  })
+  await start($, 'desktop')
+  await measure($, [{ kind: 'seven_day', percentUsed: 80, resetsAt: iso(NOW + 48 * H) }])
+  // A reset card empties the week; resetsAt stays put.
+  await clock.advance(30 * 60000)
+  await measure($, [{ kind: 'seven_day', percentUsed: 0, resetsAt: iso(NOW + 48 * H) }])
+  await clock.advance(2 * H)
+  await measure($, [{ kind: 'seven_day', percentUsed: 8, resetsAt: iso(NOW + 48 * H) }])
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
+    await ui.press({ key: 'view-full' })
+    await ui.press({ key: 'tab-quota' })
+    // $20 since the 0% reading over 8%.
+    expect(await ui.find({ type: 'Text', text: /^Predicted Week quota \$250$/ })).toBeDefined()
+    await ui.press({ key: 'view-brief' })
+    await ui.unmount()
+  }
+})
+
 test('quota: a CLI session whose ~/.claude.json names another account is filed under the true one', async ($, on) => {
   const named = await hash('uuid-cli')
   const real = await hash('uuid-real')

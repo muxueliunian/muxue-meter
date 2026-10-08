@@ -568,12 +568,25 @@ const newest = (field, acct, kind) =>
 
 // Two readings of the same window: resetsAt may move by a few seconds between responses.
 const sameWindow = (a, b) => Math.abs(a.r - b.r) < 10 * 60000
-// The earliest first reading any session took of this window.
-const baseline = (acct, kind, rd) =>
+// Every reading any session kept of this window, oldest first.
+const readingsOf = (acct, kind, rd) =>
   allDocs()
-    .map((s) => s.base?.[acct]?.[kind])
-    .filter((v) => v && typeof v.at === 'number' && sameWindow(v, rd))
-    .sort((a, b) => a.at - b.at)[0] || null
+    .flatMap((s) => [s.base?.[acct]?.[kind], s.rl?.[acct]?.[kind]])
+    .filter((v) => v && typeof v.at === 'number' && typeof v.p === 'number' && sameWindow(v, rd))
+    .sort((a, b) => a.at - b.at || a.p - b.p)
+// When the window was last reset early (a reset card): its fill fell while resetsAt stayed put,
+// so the value recorded before it belongs to the old fill. 0 when it never was.
+function resetAt(rds) {
+  let at = 0
+  for (let i = 1; i < rds.length; i++) if (rds[i].p < rds[i - 1].p) at = rds[i].at
+  return at
+}
+// The earliest reading of this window since its last early reset.
+const baseline = (acct, kind, rd) => {
+  const rds = readingsOf(acct, kind, rd)
+  const since = resetAt(rds)
+  return rds.find((v) => v.at >= since) || null
+}
 
 // A window's size in API-equivalent dollars, from a reading (rd): the value recorded since the
 // window's first reading divided by the points the fill rose since. Only that span counts: before
@@ -604,9 +617,12 @@ async function saveReadings($, rateLimits) {
     const r = Date.parse(rl?.resetsAt || '')
     if (!WINDOWS[rl?.kind] || !Number.isFinite(r) || typeof rl.percentUsed !== 'number') continue
     const rd = { p: rl.percentUsed, r, at: now }
+    const last = doc.rl[acct]?.[rl.kind]
     ;(doc.rl[acct] ||= {})[rl.kind] = rd
     const base = (doc.base[acct] ||= {})
-    if (!base[rl.kind] || !sameWindow(base[rl.kind], rd)) base[rl.kind] = rd
+    // A new window, or the same one reset early (its fill fell): start over from this reading.
+    const reset = last && sameWindow(last, rd) && rd.p < last.p
+    if (!base[rl.kind] || !sameWindow(base[rl.kind], rd) || reset) base[rl.kind] = rd
     changed = true
   }
   if (!changed) return

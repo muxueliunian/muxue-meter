@@ -1,6 +1,6 @@
 {
   "name": "muxue-meter",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "TPS, token usage and API-equivalent cost meter for Claude Code (CLI and Desktop)",
   "author": { "name": "muxue" },
   "repository": "https://github.com/muxueliunian/muxue-meter",
