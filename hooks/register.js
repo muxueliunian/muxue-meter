@@ -28,7 +28,8 @@ const WINDOWS = { five_hour: 5 * 3600000, seven_day: 7 * 86400000 }
 const BUCKET_KEEP_MS = WINDOWS.seven_day + 86400000
 const MIN_PCT = 5
 
-// USD per million tokens: [input, output, cache write (5 min), cache read].
+// USD per million tokens: [input, output, cache write (5 min), cache read]. A model priced by
+// prompt length adds its upper tier last: { over: prompt tokens, p: [the same four] }.
 // Order matters: the first matching pattern wins. Edit here when prices change.
 const PRICES = [
   [/fable-5-1|mythos-5-1/, 10, 50, 12.5, 0.25],
@@ -38,6 +39,7 @@ const PRICES = [
   [/opus-4-[01]|opus-4(?!-)/, 15, 75, 18.75, 1.5],
   [/sonnet-5/, 2, 10, 2.5, 0.2],
   [/sonnet-4/, 3, 15, 3.75, 0.3],
+  [/haiku-5-5/, 0.1, 0.5, 0.125, 0.01, { over: 100000, p: [0.5, 2.5, 0.625, 0.05] }],
   [/haiku-4-5/, 1, 5, 1.25, 0.1],
   [/haiku-3-5/, 0.8, 4, 1, 0.08],
 ]
@@ -46,12 +48,26 @@ const PRICES = [
 // FAST matches; elsewhere its price is unknown and the row shows as unpriced.
 const FAST = /opus-5/
 const FAST_X = 2
+// A request whose prompt runs over its model's upper tier is recorded as "<model>@long" and priced
+// by that tier, so the totals can still be summed from tokens. The prompt is the request's whole
+// input: uncached, cache read and cache write.
+const entryOf = (base) => PRICES.find((q) => q[0].test(base))
+const tierKey = (model, usage) => {
+  const tier = entryOf(model.split('@')[0])?.[5]
+  const prompt = (usage.input_tokens || 0) + (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0)
+  return tier && prompt > tier.over ? model + '@long' : model
+}
 const priceOf = (model) => {
-  const [base, speed] = model.split('@')
-  const p = PRICES.find((q) => q[0].test(base))
-  if (!p || !speed) return p
-  if (speed !== 'fast' || !FAST.test(base)) return undefined
-  return [p[0], ...p.slice(1).map((v) => v * FAST_X)]
+  const [base, ...flags] = model.split('@')
+  const q = entryOf(base)
+  if (!q) return undefined
+  let p = q.slice(1, 5)
+  for (const f of flags) {
+    if (f === 'long' && q[5]) p = q[5].p
+    else if (f !== 'fast' || !FAST.test(base)) return undefined
+  }
+  if (flags.includes('fast')) p = p.map((v) => v * FAST_X)
+  return [q[0], ...p]
 }
 const rowUsd = (model, r) => {
   const p = priceOf(model)
@@ -325,7 +341,9 @@ async function record($, model, usage, gen) {
   const acct = await currentAccount($)
   const byAcct = (doc.days[day] ||= {})
   const byModel = (byAcct[acct] ||= {})
-  const row = (byModel[model] ||= emptyRow())
+  // Filed under the tier it is priced at; the speed shown keeps the plain model name.
+  const key = tierKey(model, usage)
+  const row = (byModel[key] ||= emptyRow())
   row.i += usage.input_tokens || 0
   row.o += usage.output_tokens || 0
   row.cr += usage.cache_read_input_tokens || 0
@@ -334,13 +352,13 @@ async function record($, model, usage, gen) {
   if (acct !== 'unknown') {
     const bucket = (doc.b[Math.floor((await $.clock.now()) / BUCKET_MS)] ||= {})
     const cell = (bucket[acct] ||= { u: 0 })
-    cell.u += rowUsd(model, {
+    cell.u += rowUsd(key, {
       i: usage.input_tokens || 0,
       o: usage.output_tokens || 0,
       cr: usage.cache_read_input_tokens || 0,
       cw: usage.cache_creation_input_tokens || 0,
     })
-    if (!priceOf(model)) cell.x = 1
+    if (!priceOf(key)) cell.x = 1
     lastTurnAcct = acct
   }
   const out = usage.output_tokens || 0

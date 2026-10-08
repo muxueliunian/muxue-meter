@@ -528,3 +528,67 @@ test("a subagent's requests count toward the session, and several at once keep t
   expect(await ui.find({ type: 'Text', text: /Session \$3\.00/ })).toBeDefined()
   await ui.unmount()
 })
+
+test('Haiku 5.5 is priced by prompt length: over 100k tokens of prompt, cache included, pays the upper tier', async ($, on) => {
+  world(on, { env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' }, store: { cfg: enCfg } })
+  // A prompt of exactly 100k stays on the lower tier: 100k input at $0.10 + 2M output at $0.50 = $1.01.
+  // 200k read from the cache runs over it: 200k at $0.05 + 2M output at $2.50 = $5.01.
+  const steps = [
+    { model: 'claude-haiku-5-5', input_tokens: 100000, output_tokens: 2000000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+    { model: 'claude-haiku-5-5', input_tokens: 0, output_tokens: 2000000, cache_read_input_tokens: 200000, cache_creation_input_tokens: 0 },
+  ]
+  on('turn.step', async function* ($: any, e: any, next: any) {
+    const usage = steps[e.index]
+    yield { kind: 'stop', stopReason: 'end_turn', usage }
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage }
+  } as any)
+  await start($, 'desktop')
+  for (const index of [0, 1]) {
+    const stream: any = $.turn.step({ turnId: 't', index, model: 'claude-haiku-5-5', messageCount: 1 } as any)
+    for await (const _ of stream) {
+    }
+    await stream.result
+  }
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
+    expect(await ui.find({ type: 'Text', text: /Session \$6\.02/ })).toBeDefined()
+    await ui.press({ key: 'view-full' })
+    await ui.press({ key: 'tab-models' })
+    expect(await ui.find({ type: 'Text', text: /^haiku-5-5$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^haiku-5-5@long$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /no price/ })).toBeUndefined()
+    await ui.press({ key: 'view-brief' })
+    await ui.unmount()
+  }
+})
+
+test('fast mode: Opus 5 is billed at twice the standard price; elsewhere the row has no price', async ($, on) => {
+  world(on, { env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-desktop' }, store: { cfg: enCfg } })
+  // 100k output of Opus 5.5 fast at $40 = $4.00; Sonnet 5.5 has no fast price, so the total is a lower bound.
+  const steps = [
+    { model: 'claude-opus-5-5', speed: 'fast', input_tokens: 0, output_tokens: 100000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+    { model: 'claude-sonnet-5-5', speed: 'fast', input_tokens: 0, output_tokens: 100000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+  ]
+  on('turn.step', async function* ($: any, e: any, next: any) {
+    const usage = steps[e.index]
+    yield { kind: 'stop', stopReason: 'end_turn', usage }
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage }
+  } as any)
+  await start($, 'desktop')
+  for (const index of [0, 1]) {
+    const stream: any = $.turn.step({ turnId: 't', index, model: steps[index].model, messageCount: 1 } as any)
+    for await (const _ of stream) {
+    }
+    await stream.result
+  }
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
+    expect(await ui.find({ type: 'Text', text: /Session ≥\$4\.00/ })).toBeDefined()
+    await ui.press({ key: 'view-full' })
+    await ui.press({ key: 'tab-models' })
+    expect(await ui.find({ type: 'Text', text: /^opus-5-5@fast$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^sonnet-5-5@fast ⚠ no price$/ })).toBeDefined()
+    await ui.press({ key: 'view-brief' })
+    await ui.unmount()
+  }
+})
