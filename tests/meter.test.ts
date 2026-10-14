@@ -146,20 +146,10 @@ test('view switch: hidden leaves the band to an entry in the footer, brief the s
     await ui.press({ key: 'view-hidden' })
     expect(await ui.find({ type: 'Text', text: /Session \$/ })).toBeUndefined()
     expect(await ui.find({ key: 'view-brief' })).toBeUndefined()
-    if (surface === 'desktop') {
-      // Desktop: the entry is one more mode label, so it sits in the footer's row; /meter opens
-      // the card from there.
-      expect(await foot.find({ key: 'meter-show' })).toBeUndefined()
-      expect(await foot.find({ type: 'Text', text: /^— t\/s · \$0\.00 & focus$/ })).toBeDefined()
-      await $.command.run({ command: 'meter', args: '' } as any)
-      expect(await foot.find({ type: 'Text', text: /^focus$/ })).toBeDefined()
-      expect(await ui.find({ key: 'acct' })).toBeDefined()
-      await ui.press({ key: 'view-brief' })
-    } else {
-      // The footer entry brings the status line back.
-      await foot.press({ key: 'meter-show' })
-      expect(await foot.find({ key: 'meter-show' })).toBeUndefined()
-    }
+    // The footer entry, beside the engine's own labels, brings the status line back.
+    expect(await foot.find({ type: 'Text', text: /^focus$/ })).toBeDefined()
+    await foot.press({ key: 'meter-show' })
+    expect(await foot.find({ key: 'meter-show' })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: /Session \$/ })).toBeDefined()
     await foot.unmount()
     await ui.press({ key: 'view-full' })

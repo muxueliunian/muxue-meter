@@ -1118,16 +1118,15 @@ export function register(on) {
   })
 
   // The hidden view's entry, at the left of the prompt footer's mode labels: speed, session
-  // value and the update mark; a press brings the status line back. The desktop app draws a
-  // hook's own tree on a row of its own under the footer, so there the entry is one more mode
-  // label instead, drawn inline; /meter brings the status line back.
+  // value and the update mark; a press brings the status line back. The desktop app's footer
+  // (2026-10) draws a hook's tree on a row of its own under it and no longer draws mode labels
+  // given as strings, so the entry stays a tree there too.
   on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
     const savedView = (await $.state.get(S_VIEW)).value
     if (savedView !== 'hidden') return next(e)
+    const { Box, Button } = $.ui.resolve(e)
     const tps = (await $.state.get(S_TPS)).value ?? null
     const label = (tps ? tps.value.toFixed(0) : '—') + ' t/s · ' + usdOf(sessionTotals()) + (latest ? ' ⬆' : '')
-    if (e.surface === 'desktop') return next({ ...e, props: { ...e.props, modes: [label, ...e.props.modes] } })
-    const { Box, Button } = $.ui.resolve(e)
     const entry = Button({ key: 'meter-show', label, plain: true, dimColor: true, onPress: () => setView($, 'brief') })
     const rest = await next(e)
     return rest ? Box({ flexDirection: 'row', columnGap: 2, children: [entry, rest] }) : entry
