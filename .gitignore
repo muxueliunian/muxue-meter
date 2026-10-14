@@ -1,3 +1,13 @@
 claude-code.d.ts
 node_modules/
 *.log
+
+# promo renders (mp4 / wav / frames / stills) — not committed
+promo/*.mp4
+promo/*.wav
+promo/*.render.json
+promo/_frames/
+promo/stills/
+promo/events.json
+promo/events_features.json
+promo/events_film.json

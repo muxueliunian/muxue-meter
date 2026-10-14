@@ -1013,6 +1013,8 @@ export function register(on) {
     const multi = dayAgg.accts.length > 1
 
     // The status text at three widths; the widest that fits beside the toggle is shown.
+    // No emoji in it: terminals disagree on their width (the embedded terminal of the desktop app
+    // draws ⚡ in one cell, the engine counts two), and partial redraws then leave old frames behind.
     const hitText = hit === null ? '—' : fmtPct(hit)
     const tpsText = tps ? tps.value.toFixed(1) + ' tok/s' : '— tok/s'
     const todayLabel = tr('today') + (multi ? ' (' + acctName(cur) + ')' : '')
@@ -1021,13 +1023,13 @@ export function register(on) {
     const fillWide = fills.map((q) => tr(q.kind === 'five_hour' ? 'w5h' : 'w7d') + ' ' + pctOf(q.live.p))
     const fillShort = fills.length ? [fills.map((q) => pctOf(q.live.p)).join('/')] : []
     const full = [
-      '⚡ ' + (tps ? shortModel(tps.model) + ' ' : '') + tpsText,
+      (tps ? shortModel(tps.model) + ' ' : '') + tpsText,
       tr('session') + ' ' + usdOf(s),
       todayLabel + ' ' + usdOf(day),
       tr('hit') + ' ' + hitText,
     ]
-    const mid = ['⚡ ' + tpsText, tr('session') + ' ' + usdOf(s), tr('today') + ' ' + usdOf(day), tr('hit') + ' ' + hitText]
-    const compact = ['⚡' + (tps ? tps.value.toFixed(0) : '—'), usdOf(s) + '/' + usdOf(day), hitText]
+    const mid = [tpsText, tr('session') + ' ' + usdOf(s), tr('today') + ' ' + usdOf(day), tr('hit') + ' ' + hitText]
+    const compact = [(tps ? tps.value.toFixed(0) : '—') + ' t/s', usdOf(s) + '/' + usdOf(day), hitText]
     // Narrower and narrower: the model name, then the cache hit, go before the fills; the cryptic
     // compact form is the last resort.
     const variants = [
@@ -1116,13 +1118,16 @@ export function register(on) {
   })
 
   // The hidden view's entry, at the left of the prompt footer's mode labels: speed, session
-  // value and the update mark; a press brings the status line back.
+  // value and the update mark; a press brings the status line back. The desktop app draws a
+  // hook's own tree on a row of its own under the footer, so there the entry is one more mode
+  // label instead, drawn inline; /meter brings the status line back.
   on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
     const savedView = (await $.state.get(S_VIEW)).value
     if (savedView !== 'hidden') return next(e)
-    const { Box, Button } = $.ui.resolve(e)
     const tps = (await $.state.get(S_TPS)).value ?? null
-    const label = '⚡' + (tps ? tps.value.toFixed(0) : '—') + ' · ' + usdOf(sessionTotals()) + (latest ? ' ⬆' : '')
+    const label = (tps ? tps.value.toFixed(0) : '—') + ' t/s · ' + usdOf(sessionTotals()) + (latest ? ' ⬆' : '')
+    if (e.surface === 'desktop') return next({ ...e, props: { ...e.props, modes: [label, ...e.props.modes] } })
+    const { Box, Button } = $.ui.resolve(e)
     const entry = Button({ key: 'meter-show', label, plain: true, dimColor: true, onPress: () => setView($, 'brief') })
     const rest = await next(e)
     return rest ? Box({ flexDirection: 'row', columnGap: 2, children: [entry, rest] }) : entry

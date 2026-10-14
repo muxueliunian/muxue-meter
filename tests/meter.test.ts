@@ -40,7 +40,11 @@ function world(on: On, w: World) {
   mock.env(on, w.env)
   const files: Record<string, string> = { '/.claude-plugin/plugin.json': JSON.stringify({ version: '0.4.0' }), ...(w.files ?? {}) }
   on('session.start', ($, e) => ({ cwd: e.cwd }))
-  on('ui.render', ($, e) => $.ui.resolve(e).Box({ children: [] }))
+  // The engine's own drawing: the footer's mode labels joined by ' & ', nothing elsewhere.
+  on('ui.render', ($, e) => {
+    const { Box, Text } = $.ui.resolve(e)
+    return e.component === 'SessionMode' ? Text({ children: [e.props.modes.join(' & ')] }) : Box({ children: [] })
+  })
   on('session.id', () => ({ value: 'session-1' }))
   on('fs.read', ($, e) => {
     const hit = Object.keys(files).find((k) => e.path.replace(/\\/g, '/').endsWith(k))
@@ -123,7 +127,7 @@ test('narrow band: the status line drops to its compact form', async ($, on) => 
   await start($, 'desktop')
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band(40) })
-    expect(await ui.find({ type: 'Text', text: /^⚡— · \$0\.00\/\$0\.00/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^— t\/s · \$0\.00\/\$0\.00/ })).toBeDefined()
     await ui.unmount()
   }
 })
@@ -142,9 +146,20 @@ test('view switch: hidden leaves the band to an entry in the footer, brief the s
     await ui.press({ key: 'view-hidden' })
     expect(await ui.find({ type: 'Text', text: /Session \$/ })).toBeUndefined()
     expect(await ui.find({ key: 'view-brief' })).toBeUndefined()
-    // The footer entry brings the status line back.
-    await foot.press({ key: 'meter-show' })
-    expect(await foot.find({ key: 'meter-show' })).toBeUndefined()
+    if (surface === 'desktop') {
+      // Desktop: the entry is one more mode label, so it sits in the footer's row; /meter opens
+      // the card from there.
+      expect(await foot.find({ key: 'meter-show' })).toBeUndefined()
+      expect(await foot.find({ type: 'Text', text: /^— t\/s · \$0\.00 & focus$/ })).toBeDefined()
+      await $.command.run({ command: 'meter', args: '' } as any)
+      expect(await foot.find({ type: 'Text', text: /^focus$/ })).toBeDefined()
+      expect(await ui.find({ key: 'acct' })).toBeDefined()
+      await ui.press({ key: 'view-brief' })
+    } else {
+      // The footer entry brings the status line back.
+      await foot.press({ key: 'meter-show' })
+      expect(await foot.find({ key: 'meter-show' })).toBeUndefined()
+    }
     expect(await ui.find({ type: 'Text', text: /Session \$/ })).toBeDefined()
     await foot.unmount()
     await ui.press({ key: 'view-full' })
@@ -555,7 +570,7 @@ test('an impossible speed (a timing glitch) is neither shown nor recorded', asyn
   }
   await stream.result
   const ui = await $.ui.mount({ plugin: 'muxue-meter', surface: 'desktop', ...band() })
-  expect(await ui.find({ type: 'Text', text: /^⚡ — tok\/s · Session \$0\.0\d/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^— tok\/s · Session \$0\.0\d/ })).toBeDefined()
   await ui.press({ key: 'view-full' })
   await ui.press({ key: 'tab-models' })
   expect(await ui.find({ type: 'Text', text: /t\/s$/ })).toBeUndefined()
