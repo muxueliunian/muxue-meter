@@ -450,17 +450,21 @@ function sessionTotals() {
 // ---- quota estimate ---------------------------------------------------------------------
 
 // ---- account check ----
-// A CLI session takes its account from ~/.claude.json, which can name another account than the
-// credentials the CLI really uses; its usage and readings then land under the wrong account. The
-// seven-day window tells accounts apart: its reset time is the account's own and stays put for a
-// week, so one account cannot hold two overlapping weeks. When it does, the week that a session
-// with the account from CLAUDE_CODE_ACCOUNT_UUID (src 'env') saw, or else the one no other
-// account also holds, is the account's; a session holding the other week is moved to the account
-// that week belongs to, or, when none is known, its quota data is left out (its tokens stay).
+// A session's account is only a label, and either source can name another account than the
+// credentials really in use: ~/.claude.json can lag behind the CLI's credentials, and a desktop
+// session has run for hours on another account under its old CLAUDE_CODE_ACCOUNT_UUID (src
+// 'env'). Its usage and readings then land under the wrong account. The seven-day window tells
+// accounts apart: its reset time is the account's own and stays put for a week, so one account
+// cannot hold two overlapping weeks. Only an account that does is checked. Each week goes to the
+// account the sessions saw it under, an env session outweighing any number of file ones, the
+// weeks with the clearest lead first, and never to an account already given an overlapping week.
+// A session's entries under a checked account whose newest week went to another are moved there,
+// or, when the week has no owner, have their quota data left out (their tokens stay).
 const weeksOf = (s, a) =>
   [s.rl?.[a]?.seven_day, s.base?.[a]?.seven_day].filter((v) => v && typeof v.r === 'number').map((v) => v.r)
 // Two different weeks of one account that overlap: impossible for the same account.
 const clash = (r1, r2) => !sameWindow({ r: r1 }, { r: r2 }) && Math.abs(r1 - r2) < WINDOWS.seven_day - 10 * 60000
+const ENV_VOTE = 1000
 
 // Map(doc -> { acct: true account, or null when unknown }) for the docs filed under a wrong one.
 function acctFixes(docs) {
@@ -469,16 +473,45 @@ function acctFixes(docs) {
     const accts = new Set([...Object.keys(s.rl || {}), ...Object.keys(s.base || {})])
     for (const a of accts) for (const r of weeksOf(s, a)) claims.push({ s, a, r, env: s.src === 'env' })
   }
-  const heldByOther = (c) => claims.some((d) => d.a !== c.a && sameWindow(d, c))
-  const fixes = new Map()
+  const checked = new Set()
+  for (const c of claims) for (const d of claims) if (c.a === d.a && clash(c.r, d.r)) checked.add(c.a)
+  if (!checked.size) return new Map()
+
+  // Weeks: runs of reset times a few seconds apart. A session votes once per week and account.
+  const weeks = []
+  const weekOf = new Map()
+  for (const c of [...claims].sort((x, y) => x.r - y.r)) {
+    let w = weeks[weeks.length - 1]
+    if (!w || !sameWindow({ r: w.hi }, c)) weeks.push((w = { r: c.r, hi: c.r, votes: new Map() }))
+    w.hi = c.r
+    weekOf.set(c, w)
+    const byDoc = w.votes.get(c.a) || new Map()
+    byDoc.set(c.s, c.env ? ENV_VOTE : 1)
+    w.votes.set(c.a, byDoc)
+  }
+  for (const w of weeks) {
+    w.cands = [...w.votes].map(([a, byDoc]) => ({ a, n: [...byDoc.values()].reduce((x, y) => x + y, 0) }))
+    w.cands.sort((x, y) => y.n - x.n || (x.a < y.a ? -1 : 1))
+    w.lead = w.cands[0].n - (w.cands[1]?.n || 0)
+  }
+  const given = new Map() // acct -> the weeks it was given
+  for (const w of [...weeks].sort((x, y) => y.lead - x.lead || y.cands[0].n - x.cands[0].n || y.r - x.r)) {
+    const c = w.cands.find(({ a }) => !(given.get(a) || []).some((o) => clash(o.r, w.r)))
+    w.owner = c ? c.a : null
+    if (c) given.set(c.a, [...(given.get(c.a) || []), w])
+  }
+
+  // Each doc's newest week per checked account decides where that account's entries go.
+  const newestWeek = new Map()
   for (const c of claims) {
-    if (c.env) continue
-    const wrong = claims.some((d) => d.a === c.a && clash(c.r, d.r) && (d.env || (heldByOther(c) && !heldByOther(d))))
-    if (!wrong) continue
-    const owners = claims.filter((d) => d.a !== c.a && sameWindow(d, c)).sort((x, y) => y.env - x.env)
-    const fix = (fixes.get(c.s) || {})
-    fix[c.a] = owners[0]?.a ?? null
-    fixes.set(c.s, fix)
+    if (!checked.has(c.a)) continue
+    const m = newestWeek.get(c.s) || {}
+    if (!m[c.a] || c.r > m[c.a].r) m[c.a] = { r: c.r, w: weekOf.get(c) }
+    newestWeek.set(c.s, m)
+  }
+  const fixes = new Map()
+  for (const [s, m] of newestWeek) {
+    for (const [a, { w }] of Object.entries(m)) if (w.owner !== a) fixes.set(s, { ...(fixes.get(s) || {}), [a]: w.owner })
   }
   return fixes
 }
@@ -488,15 +521,21 @@ function acctFixes(docs) {
 function refiled(s, fix) {
   // Tokens of an account whose true one is unknown stay where they are.
   const known = Object.fromEntries(Object.entries(fix).filter(([, to]) => to))
-  const move = (byAcct, map, merge) => {
-    const out = { ...byAcct }
-    for (const [from, to] of Object.entries(map)) {
-      if (!(from in out)) continue
-      const v = out[from]
-      delete out[from]
-      if (to) out[to] = to in out ? merge(out[to], v) : v
+  // Built from the source keys, so a swap (a -> b, b -> a) does not move an entry twice.
+  const move = (byAcct, map, merge, keep = (v) => v) => {
+    const out = {}
+    for (const [from, v0] of Object.entries(byAcct)) {
+      const to = from in map ? map[from] : from
+      const v = to && keep(v0, from, to)
+      if (v) out[to] = to in out ? merge(out[to], v) : v
     }
     return out
+  }
+  // An estimate divides spend by fill: it holds only for the account it was made for (a), or,
+  // untagged (before 0.7.5), the one it was filed under.
+  const ownEst = (byKind, from, to) => {
+    const out = Object.fromEntries(Object.entries(byKind || {}).filter(([, e]) => (e?.a ?? from) === to))
+    return Object.keys(out).length ? out : null
   }
   const sumRows = (x, y) => {
     const out = { ...x }
@@ -519,7 +558,7 @@ function refiled(s, fix) {
     b: each(s.b, (byAcct) => move(byAcct, fix, sumCell)),
     rl: move(s.rl || {}, fix, newest),
     base: move(s.base || {}, fix, newest),
-    est: move(s.est || {}, fix, newest),
+    est: move(s.est || {}, fix, newest, ownEst),
   }
 }
 
@@ -562,8 +601,9 @@ const newest = (field, acct, kind) =>
   allDocs()
     .map((s) => s[field]?.[acct]?.[kind])
     // An estimate without d (delta) is from before 0.5.1, which could divide the whole window,
-    // usage it never saw included, by its fill: those are left out.
-    .filter((v) => v && typeof v.at === 'number' && (field !== 'est' || v.d))
+    // usage it never saw included, by its fill: those are left out. So is one made for another
+    // account (a) than the one it is filed under.
+    .filter((v) => v && typeof v.at === 'number' && (field !== 'est' || (v.d && (v.a ?? acct) === acct)))
     .sort((a, b) => b.at - a.at)[0] || null
 
 // Two readings of the same window: resetsAt may move by a few seconds between responses.
@@ -635,7 +675,7 @@ async function saveReadings($, rateLimits) {
   for (const [kind, rd] of real ? Object.entries(doc.rl[acct]) : []) {
     if (rd.at !== now) continue
     const { q } = estimate(real, kind, rd)
-    if (q !== null) (doc.est[acct] ||= {})[kind] = { q, r: rd.r, at: now, d: 1 }
+    if (q !== null) (doc.est[acct] ||= {})[kind] = { q, r: rd.r, at: now, d: 1, a: real }
   }
   dataVersion++
   scheduleFlush($)

@@ -630,3 +630,97 @@ test('Haiku 5.5 is priced by prompt length, and Sonnet 5.5 cache reads at $0.10'
     await ui.unmount()
   }
 })
+
+// An account shows up in the picker only with tokens recorded: one request under it.
+const used = (a: string) => ({ '2026-10-02': { [a]: { 'claude-opus-5-5': { i: 1, o: 1, cr: 0, cw: 0, n: 1, gms: 0, gtok: 0 } } } })
+
+test('quota: a desktop session on another account than its env var is filed under the true one', async ($, on) => {
+  const x = await hash('uuid-x')
+  const y = await hash('uuid-y')
+  world(on, {
+    env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-x' },
+    store: {
+      cfg: { ...enCfg, names: { [x]: 'xx', [y]: 'yy' } },
+      // X's own week, and its 5h window still open at 99%.
+      's:x': {
+        upd: NOW,
+        src: 'env',
+        days: {},
+        base: { [x]: { seven_day: { p: 50, r: NOW + 30 * H, at: NOW - 50 * H } } },
+        rl: { [x]: { five_hour: { p: 99, r: NOW + 2 * H, at: NOW - 2 * H - 180000 }, seven_day: { p: 99, r: NOW + 30 * H, at: NOW - 2 * H - 180000 } } },
+      },
+      // A session still labelled X by its env var but running on Y: its readings carry Y's
+      // week and an already closed 5h window, and are newer than X's own.
+      's:stale': {
+        upd: NOW,
+        src: 'env',
+        days: {},
+        rl: { [x]: { five_hour: { p: 24, r: NOW - H, at: NOW - 2 * H }, seven_day: { p: 28, r: NOW + 80 * H, at: NOW - 2 * H } } },
+        est: { [x]: { five_hour: { q: 31.9, r: NOW - H, at: NOW - 2 * H, d: 1 } } },
+      },
+      's:y': {
+        upd: NOW,
+        src: 'env',
+        days: used(y),
+        rl: { [y]: { five_hour: { p: 40, r: NOW + 3 * H, at: NOW - H }, seven_day: { p: 30, r: NOW + 80 * H, at: NOW - H } } },
+      },
+    },
+  })
+  await start($, 'desktop')
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
+    await ui.press({ key: 'view-full' })
+    await ui.press({ key: 'tab-quota' })
+    await ui.select({ key: 'acct', value: x })
+    expect(await ui.find({ type: 'Text', text: /^99%$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^28%$/ })).toBeUndefined()
+    // The estimate made against X's spend does not follow the readings to Y.
+    await ui.select({ key: 'acct', value: y })
+    expect(await ui.find({ type: 'Text', text: /^40%$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /\$31\.90/ })).toBeUndefined()
+    await ui.select({ key: 'acct', value: 'all' })
+    await ui.press({ key: 'view-brief' })
+    await ui.unmount()
+  }
+})
+
+test('quota: when env sessions contradict each other, the weeks most of them saw decide', async ($, on) => {
+  const x = await hash('uuid-x')
+  const y = await hash('uuid-y')
+  const env = (a: string, r: number) => ({ upd: NOW, src: 'env', days: used(a), rl: { [a]: { seven_day: { p: 10, r, at: NOW - H } } } })
+  world(on, {
+    env: { HOME: '/Users/mac', CLAUDE_CODE_ACCOUNT_UUID: 'uuid-x' },
+    store: {
+      cfg: { ...enCfg, names: { [x]: 'xx', [y]: 'yy' } },
+      's:x1': env(x, NOW + 30 * H),
+      's:x2': env(x, NOW + 30 * H),
+      's:y1': env(y, NOW + 80 * H),
+      's:y2': env(y, NOW + 80 * H),
+      // One env session of each account saw the other's week.
+      's:bad-x': env(x, NOW + 80 * H),
+      's:bad-y': env(y, NOW + 30 * H),
+      // A CLI session rightly filed under Y, on Y's week.
+      's:cli': {
+        upd: NOW,
+        src: 'file',
+        days: used(y),
+        rl: { [y]: { five_hour: { p: 37, r: NOW + 3 * H, at: NOW - 30 * 60000 }, seven_day: { p: 31, r: NOW + 80 * H, at: NOW - 30 * 60000 } } },
+      },
+    },
+  })
+  await start($, 'desktop')
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ plugin: 'muxue-meter', surface, ...band() })
+    await ui.press({ key: 'view-full' })
+    await ui.press({ key: 'tab-quota' })
+    await ui.select({ key: 'acct', value: y })
+    expect(await ui.find({ type: 'Text', text: /^37%$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^31%$/ })).toBeDefined()
+    await ui.select({ key: 'acct', value: x })
+    expect(await ui.find({ type: 'Text', text: /^37%$/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /^10%$/ })).toBeDefined()
+    await ui.select({ key: 'acct', value: 'all' })
+    await ui.press({ key: 'view-brief' })
+    await ui.unmount()
+  }
+})
